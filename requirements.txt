@@ -1,0 +1,4 @@
+numpy>=1.26
+ursina>=8.0
+# tests only:
+pytest>=7.0
