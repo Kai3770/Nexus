@@ -6,8 +6,11 @@ Headless authoritative server.  Needs only Python and NumPy (no window, no
 Ursina), so it runs on any machine of the LAN:
 
     python dedicated_server.py --map datacore --bots 8 --name "FLOOR 3 ARENA"
+    python dedicated_server.py --list-maps
 
 Clients find it automatically through the LAN lobby (beacon on UDP 28015).
+Arenas come from ``content/maps_registry.py`` and ``content/maps/*.json``;
+clients need the same arena files (the handshake compares checksums).
 """
 from __future__ import annotations
 
@@ -19,13 +22,19 @@ import threading
 import time
 
 MODES = {"tdm": 0, "ffa": 1}
+ROOT = os.path.dirname(os.path.abspath(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 
 def parse_args(argv=None) -> argparse.Namespace:
+    from engine import maps
+
     parser = argparse.ArgumentParser(description="NEXUS-3D-EXTREME dedicated server")
     parser.add_argument("--name", default="NEXUS DEDICATED")
     parser.add_argument("--port", type=int, default=0, help="gameplay UDP port (default 28016)")
-    parser.add_argument("--map", default="datacore", choices=("datacore", "skybridge", "crucible"))
+    parser.add_argument("--map", default=maps.MAP_KEYS[0], choices=maps.MAP_KEYS,
+                        help="arena key from content/maps_registry.py or content/maps/*.json")
     parser.add_argument("--mode", default="tdm", choices=sorted(MODES))
     parser.add_argument("--max-players", type=int, default=12)
     parser.add_argument("--bots", type=int, default=8, help="the server tops the match up to this many players with bots")
@@ -37,14 +46,29 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--no-beacon", action="store_true", help="do not advertise on the LAN")
     parser.add_argument("--duration", type=float, default=0.0, help="stop after this many seconds (0 = run until Ctrl+C)")
     parser.add_argument("--status-every", type=float, default=10.0)
+    parser.add_argument("--list-maps", action="store_true", help="print the arena registry and exit")
     return parser.parse_args(argv)
+
+
+def list_maps() -> int:
+    """Print every registered arena with its checksum and validation result."""
+    from engine import maps
+
+    for error in maps.REGISTRY_ERRORS:
+        print("skipped %s" % error)
+    for key in maps.MAP_KEYS:
+        loaded = maps.load_map(key)
+        data, problems = loaded.data, maps.validate_map(loaded)
+        print("%-12s %-12s crc %08x  %3d boxes  %2d spawns  %3d nav nodes  %s" % (
+            key, data.name, data.checksum, int(data.box_visible.sum()), data.spawn_pos.shape[0], loaded.nav.count,
+            "ok" if not problems else "; ".join(problems)))
+    return 0
 
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    root = os.path.dirname(os.path.abspath(__file__))
-    if root not in sys.path:
-        sys.path.insert(0, root)
+    if args.list_maps:
+        return list_maps()
     from engine import config as C
     from engine import network_lan as N
 

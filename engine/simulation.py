@@ -103,6 +103,7 @@ class PlayerStore:
         self.operator = np.zeros((n, W.OPERATOR_COUNT), dtype=np.int64)
         self.prestige = np.zeros(n, dtype=np.int64)
         self.pending_credits = np.zeros(n, dtype=np.float64)
+        self.blast_resist = np.ones(n, dtype=np.float64)           # explosive damage multiplier (Blast Plating)
         self.names = [""] * n
 
     # ---- convenience -------------------------------------------------------------
@@ -128,7 +129,8 @@ class PlayerStore:
         self.operator[row] = op
         self.prestige[row] = int(prestige)
         eff = W.OPERATOR_EFFECT
-        self.max_health[row] = C.BASE_HEALTH + eff[W.OP_PLATING] * op[W.OP_PLATING]
+        self.max_health[row] = C.BASE_HEALTH                       # fixed vital ceiling for everybody
+        self.blast_resist[row] = 1.0 - eff[W.OP_PLATING] * op[W.OP_PLATING]
         self.ability_cooldown[row] = max(int(round(C.ABILITY_COOLDOWN * (1.0 - eff[W.OP_CAPACITOR] * op[W.OP_CAPACITOR]) * _TICKS)), _TICKS)
         self.regen_delay[row] = max(int(round(C.HEALTH_REGEN_DELAY * (1.0 - eff[W.OP_NANITES] * op[W.OP_NANITES]) * _TICKS)), _TICKS // 2)
 
@@ -596,7 +598,7 @@ class GameWorld:
         if rows.size == 0:
             return
         falloff = (1.0 - dist / C.GRENADE_RADIUS) ** 2
-        damage = C.GRENADE_DAMAGE * falloff * np.where(rows == owner, 0.5, 1.0)
+        damage = C.GRENADE_DAMAGE * falloff * np.where(rows == owner, 0.5, 1.0) * s.blast_resist[rows]
         push = delta / np.maximum(dist, 1.0e-6)[:, None]
         push[:, 1] = np.maximum(push[:, 1], 0.35)
         s.move.vel[rows] += push * (C.EXPLOSION_KNOCKBACK * (1.0 - dist / C.GRENADE_RADIUS))[:, None]

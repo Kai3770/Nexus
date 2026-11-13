@@ -220,10 +220,12 @@ class LobbyScreen(Screen):
     def join(self, index: int) -> None:
         if index < len(self.infos):
             info = self.infos[index]
-            if info.compatible:
+            if info.joinable:
                 self.game.join_match(info.address, info.port)
-            else:
+            elif not info.compatible:
                 self.menu.notify("That server runs a different game version")
+            else:
+                self.menu.notify("That server runs an arena that is not installed here")
 
     def refresh(self) -> None:
         browser = self.game.browser
@@ -238,7 +240,8 @@ class LobbyScreen(Screen):
                 info = self.infos[index]
                 values = (info.name, info.map_name, info.mode_name,
                           "%d / %d  (+%d bots)%s" % (info.players, info.max_players, info.bots,
-                                                     "" if info.compatible else "  VERSION"))
+                                                     "" if info.joinable else
+                                                     ("  VERSION" if not info.compatible else "  NO MAP")))
                 button.enabled = True
             else:
                 values = ("", "", "", "")
@@ -450,25 +453,28 @@ class SponsorScreen(Screen):
 class SettingsScreen(Screen):
     title = "SETTINGS"
     STEPS = {"sensitivity": 0.1, "fov": 5.0, "volume": 0.1}
+    FRAME_LIMITS = (60, 90, 120, 144, 240, 0)
+    ROWS = (("sensitivity", "MOUSE SENSITIVITY"), ("fov", "FIELD OF VIEW"), ("volume", "MASTER VOLUME"),
+            ("invert_y", "INVERT Y AXIS"), ("quality", "GRAPHICS QUALITY"),
+            ("dynamic_resolution", "DYNAMIC RESOLUTION (HOLDS 60 FPS)"), ("fps_limit", "FRAME LIMIT"),
+            ("vsync", "VSYNC (NEXT START)"), ("show_fps", "SHOW FPS / NETWORK STATS"))
 
     def build(self) -> None:
-        self.panel(0.0, 0.02, 0.96, 0.66)
+        self.panel(0.0, 0.0, 0.96, 0.74)
         self.values = {}
-        for index, (key, text) in enumerate((("sensitivity", "MOUSE SENSITIVITY"), ("fov", "FIELD OF VIEW"),
-                                             ("volume", "VOLUME"), ("invert_y", "INVERT Y AXIS"),
-                                             ("show_fps", "SHOW FPS / NETWORK STATS"))):
-            y = 0.27 - index * 0.085
-            self.label(text, -0.42, y, 0.95, rgb=COL_DIM)
-            self.button("-", 0.10, y, 0.05, 0.052, lambda k=key: self.change(k, -1))
-            self.values[key] = self.label("", 0.25, y, 1.0, (0, 0))
-            self.button("+", 0.40, y, 0.05, 0.052, lambda k=key: self.change(k, 1))
-        self.label("CALLSIGN", -0.42, -0.165, 0.95, rgb=COL_DIM)
-        self.name_field = InputField(default_value=self.pm.profile.name, parent=self.root, position=(0.13, -0.165),
-                                     scale=(0.36, 0.05), character_limit=16)
-        self.button("APPLY", 0.40, -0.165, 0.12, 0.05, self.apply_name, COL_GOOD, 0.8)
+        for index, (key, text) in enumerate(self.ROWS):
+            y = 0.305 - index * 0.057
+            self.label(text, -0.42, y, 0.82, rgb=COL_DIM)
+            self.button("-", 0.10, y, 0.05, 0.044, lambda k=key: self.change(k, -1))
+            self.values[key] = self.label("", 0.25, y, 0.9, (0, 0))
+            self.button("+", 0.40, y, 0.05, 0.044, lambda k=key: self.change(k, 1))
+        self.label("CALLSIGN", -0.42, -0.225, 0.82, rgb=COL_DIM)
+        self.name_field = InputField(default_value=self.pm.profile.name, parent=self.root, position=(0.13, -0.225),
+                                     scale=(0.36, 0.046), character_limit=16)
+        self.button("APPLY", 0.40, -0.225, 0.12, 0.046, self.apply_name, COL_GOOD, 0.8)
         self.label("Controls:  WASD move   SHIFT sprint   C / CTRL crouch + slide   SPACE jump   LMB fire   RMB aim",
-                   0.0, -0.245, 0.62, (0, 0), COL_DIM)
-        self.label("R reload   Q swap weapon   G pulse grenade   TAB scoreboard   ESC pause", 0.0, -0.275, 0.62, (0, 0), COL_DIM)
+                   0.0, -0.285, 0.60, (0, 0), COL_DIM)
+        self.label("R reload   Q swap weapon   G pulse grenade   TAB scoreboard   ESC pause", 0.0, -0.312, 0.60, (0, 0), COL_DIM)
         self.back_button()
 
     def change(self, key: str, direction: int) -> None:
@@ -476,6 +482,12 @@ class SettingsScreen(Screen):
         if key in self.STEPS:
             lo, hi = {"sensitivity": (0.1, 5.0), "fov": (60.0, 120.0), "volume": (0.0, 1.0)}[key]
             self.pm.set_setting(key, round(min(max(settings[key] + direction * self.STEPS[key], lo), hi), 2))
+        elif key == "quality":
+            self.pm.set_setting(key, int(min(max(int(settings[key]) + direction, 0), len(C.QUALITY_NAMES) - 1)))
+        elif key == "fps_limit":
+            options = self.FRAME_LIMITS
+            current = options.index(int(settings[key])) if int(settings[key]) in options else 3
+            self.pm.set_setting(key, options[(current + direction) % len(options)])
         else:
             self.pm.set_setting(key, not settings[key])
         self.game.apply_settings()
@@ -491,8 +503,10 @@ class SettingsScreen(Screen):
         self.set_text(self.values["sensitivity"], "%.1f" % settings["sensitivity"])
         self.set_text(self.values["fov"], "%d" % settings["fov"])
         self.set_text(self.values["volume"], "%d%%" % round(settings["volume"] * 100))
-        self.set_text(self.values["invert_y"], "ON" if settings["invert_y"] else "OFF")
-        self.set_text(self.values["show_fps"], "ON" if settings["show_fps"] else "OFF")
+        self.set_text(self.values["quality"], C.QUALITY_NAMES[int(settings["quality"]) % len(C.QUALITY_NAMES)])
+        self.set_text(self.values["fps_limit"], ("%d FPS" % settings["fps_limit"]) if settings["fps_limit"] else "OFF")
+        for key in ("invert_y", "dynamic_resolution", "vsync", "show_fps"):
+            self.set_text(self.values[key], "ON" if settings[key] else "OFF")
 
 
 # =========================================================================== #

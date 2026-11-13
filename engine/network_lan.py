@@ -58,13 +58,14 @@ HEADER = struct.Struct("<HBI")                      # magic, packet type, sessio
 PKT_CONNECT_REQ, PKT_CONNECT_ACK, PKT_CONNECT_DENY, PKT_DISCONNECT, PKT_CLIENT_FRAME, PKT_SNAPSHOT, PKT_ROSTER = range(1, 8)
 DENY_FULL, DENY_VERSION, DENY_BAD_REQUEST = 1, 2, 3
 DENY_REASONS = {DENY_FULL: "server is full", DENY_VERSION: "protocol version mismatch", DENY_BAD_REQUEST: "bad request"}
+CONTENT_MISMATCH = "the server runs an arena that is not installed here (or a different version of it)"
 
 BEACON_MAGIC = b"NXB1"
 BEACON_KEY = b"NX3D-lan-beacon-key-9d41f0c2b7"
-BEACON_STRUCT = struct.Struct("<HHBBBBBBIB")       # protocol, port, humans, max, bots, map, mode, tick rate, uid, name length
+BEACON_STRUCT = struct.Struct("<HHBBBBBBIIB")      # protocol, port, humans, max, bots, map, mode, tick rate, uid, map crc, name length
 
 CONNECT_REQ = struct.Struct("<HIBB")               # protocol, nonce, preferred team, name length (+ name + loadout)
-CONNECT_ACK = struct.Struct("<IBIBBBBIBBHH")       # nonce, id, tick, rate, map, mode, team, token, max, upgrades, score, time
+CONNECT_ACK = struct.Struct("<IBIBBBBIBBHHI")      # nonce, id, tick, rate, map, mode, team, token, max, upgrades, score, time, map crc
 CONNECT_DENY = struct.Struct("<IB")
 FRAME_HEADER = struct.Struct("<IIIIHBB")           # ack snapshot, ack event, client ms, newest cmd, ping, n cmds, n fire
 FIRE_RECORD = struct.Struct("<HIIB")               # shot seq, command tick, client view time (ms), weapon slot
@@ -95,7 +96,7 @@ _EVENT_FORMATS = {
     S.EV_EXPLOSION: struct.Struct("<hhhBB"),        # position, owner, grenade id
     S.EV_GRENADE: struct.Struct("<BBhhhhhhHI"),     # id, owner, position, velocity, fuse, spawn tick
     S.EV_REWARD: struct.Struct("<IHB"),             # credits, xp, reason
-    S.EV_MATCH: struct.Struct("<BBBB"),             # phase, winner, map, mode
+    S.EV_MATCH: struct.Struct("<BBBBI"),            # phase, winner, map, mode, map crc
 }
 
 assert C.MAX_PLAYERS <= 16, "entity masks are 16 bit"
@@ -312,7 +313,7 @@ def encode_event(event: tuple) -> bytes:
     elif kind == S.EV_REWARD:
         body = fmt.pack(int(event[2]) & 0xFFFFFFFF, min(int(event[3]), 65535), event[4])
     elif kind == S.EV_MATCH:
-        body = fmt.pack(event[1], event[2] & 0xFF, event[3], event[4])
+        body = fmt.pack(event[1], event[2] & 0xFF, event[3], event[4], (event[5] if len(event) > 5 else 0) & 0xFFFFFFFF)
     else:
         raise ValueError("unknown event type %r" % (kind,))
     return bytes((kind,)) + body
@@ -341,7 +342,7 @@ def decode_event(data: bytes, offset: int):
     elif kind == S.EV_REWARD:
         event = (kind, f[0], f[1], f[2])
     else:
-        event = (kind, f[0], f[1], f[2], f[3])
+        event = (kind, f[0], f[1], f[2], f[3], f[4])
     return event, offset
 
 
@@ -363,10 +364,16 @@ class ServerInfo:
     uid: int
     protocol: int
     last_seen: float = 0.0
+    map_crc: int = 0
+
+    @property
+    def has_map(self) -> bool:
+        """True when this installation has the very arena the server is running."""
+        return local_map_matches(self.map_index, self.map_crc)
 
     @property
     def map_name(self) -> str:
-        return maps.MAP_NAMES[self.map_index % maps.MAP_COUNT]
+        return maps.MAP_NAMES[self.map_index] if self.has_map else "CUSTOM ARENA"
 
     @property
     def mode_name(self) -> str:
@@ -376,13 +383,24 @@ class ServerInfo:
     def compatible(self) -> bool:
         return self.protocol == C.PROTOCOL_VERSION
 
+    @property
+    def joinable(self) -> bool:
+        return self.compatible and self.has_map
+
+
+def local_map_matches(map_index: int, checksum: int) -> bool:
+    """Does the local map registry hold exactly the arena a server announced?"""
+    return 0 <= map_index < maps.MAP_COUNT and maps.get_map_data(map_index).checksum == checksum
+
 
 def encode_beacon(name: str, port: int, players: int, max_players: int, bots: int, map_index: int, mode: int,
-                  uid: int) -> bytes:
+                  uid: int, map_crc: int | None = None) -> bytes:
     """Sealed (encrypted + authenticated) server advertisement."""
     raw_name = name.encode("utf-8")[:32]
+    if map_crc is None:
+        map_crc = maps.get_map_data(map_index).checksum
     plain = BEACON_STRUCT.pack(C.PROTOCOL_VERSION, port, players, max_players, bots, map_index, mode,
-                               C.TICK_RATE, uid & 0xFFFFFFFF, len(raw_name)) + raw_name
+                               C.TICK_RATE, uid & 0xFFFFFFFF, map_crc & 0xFFFFFFFF, len(raw_name)) + raw_name
     return BEACON_MAGIC + crypto.seal(BEACON_KEY, plain)
 
 
@@ -392,11 +410,13 @@ def decode_beacon(datagram: bytes, address: str) -> ServerInfo | None:
         return None
     try:
         plain = crypto.unseal(BEACON_KEY, datagram[4:])
-        protocol, port, players, max_players, bots, map_index, mode, rate, uid, length = BEACON_STRUCT.unpack_from(plain, 0)
+        (protocol, port, players, max_players, bots, map_index, mode, rate, uid, map_crc,
+         length) = BEACON_STRUCT.unpack_from(plain, 0)
         name = plain[BEACON_STRUCT.size: BEACON_STRUCT.size + length].decode("utf-8", "replace")
     except (crypto.AuthenticationError, struct.error):
         return None
-    return ServerInfo(address, port, name, players, max_players, bots, map_index, mode, rate, uid, protocol)
+    return ServerInfo(address, port, name, players, max_players, bots, map_index, mode, rate, uid, protocol,
+                      map_crc=map_crc)
 
 
 def local_ipv4_addresses() -> list:
@@ -843,7 +863,8 @@ class GameServer:
     def _beacon_datagram(self) -> bytes:
         world = self.world
         return encode_beacon(self.config.name, self.port, len(self.conns), self.config.max_players,
-                             int(world.bots().size), world.map_index, world.mode, self.uid)
+                             int(world.bots().size), world.map_index, world.mode, self.uid,
+                             world.loaded.data.checksum)
 
     # ---- threads -----------------------------------------------------------------------------
     def _receive_loop(self) -> None:
@@ -955,7 +976,8 @@ class GameServer:
         payload = CONNECT_ACK.pack(conn.nonce, conn.pid, conn.consumed & 0xFFFFFFFF, C.TICK_RATE, world.map_index,
                                    world.mode, int(world.store.team[conn.pid]) & 0xFF, conn.token,
                                    self.config.max_players, int(world.upgrades_enabled),
-                                   min(world.score_limit, 65535), min(int(world.time_limit), 65535))
+                                   min(world.score_limit, 65535), min(int(world.time_limit), 65535),
+                                   world.loaded.data.checksum)
         self._send_raw(make_packet(PKT_CONNECT_ACK, conn.token, payload), conn.addr)
 
     def _handle_frame(self, conn: Connection, data: bytes, offset: int, received: float) -> None:
@@ -1114,6 +1136,8 @@ class GameServer:
         everyone = list(self.conns.values())
         for event in events:
             kind = event[0]
+            if kind == S.EV_MATCH:
+                event = event + (self.world.loaded.data.checksum,)
             blob = encode_event(event)
             if kind in (S.EV_HIT, S.EV_REWARD):
                 conn = by_pid.get(event[1])
@@ -1559,6 +1583,7 @@ class GameClient:
         self.render_ms = 0.0
         self.ping_ms = 0.0
         self._connect_started = 0.0
+        self._last_send = 0.0
         self._last_request = 0.0
         self._request = b""
         self.last_packet = 0.0
@@ -1595,10 +1620,12 @@ class GameClient:
             self.conditioner.start()
         self._connect_started = time.perf_counter()
         self._last_request = 0.0
+        self._last_send = time.perf_counter()
 
     def _receive_loop(self) -> None:
         sock = self.sock
         while self.running:
+            self._keep_alive()
             try:
                 data, addr = sock.recvfrom(C.RECV_BUFFER)
             except socket.timeout:
@@ -1609,9 +1636,31 @@ class GameClient:
                 continue
             self.inbox.append((data, addr, time.perf_counter()))
 
+    def _keep_alive(self) -> None:
+        """
+        Runs on the receive thread.  While the main thread is busy (baking an
+        arena on its first load can take several seconds) no commands leave
+        this client; an empty frame once per second stops the server from
+        timing the connection out.
+        """
+        if self.state != CONNECTED or self.sock is None or self.server is None:
+            return
+        now = time.perf_counter()
+        if now - self._last_send < C.KEEPALIVE_INTERVAL:
+            return
+        self._last_send = now
+        payload = FRAME_HEADER.pack(0 if self.need_full else self.last_snapshot_tick, self.event_seq, now_ms() or 1,
+                                    self.cmd_tick & 0xFFFFFFFF, int(min(self.ping_ms, 65535)), 0, 0)
+        try:
+            self.sock.sendto(make_packet(PKT_CLIENT_FRAME, self.token, payload), self.server)
+            self.stats["keepalives"] = self.stats.get("keepalives", 0) + 1
+        except OSError:
+            pass
+
     def _send(self, datagram: bytes) -> None:
         if self.sock is None or self.server is None:
             return
+        self._last_send = time.perf_counter()
         try:
             self.conditioner.send(self.sock, datagram, self.server)
             self.stats["bytes_out"] += len(datagram)
@@ -1623,6 +1672,13 @@ class GameClient:
             for _ in range(2):
                 self._send(make_packet(PKT_DISCONNECT, self.token, b"\x00"))
         self.close()
+
+    def _abort(self, token: int, reason: str) -> None:
+        """Give the slot back to the server and stop with an explanation for the player."""
+        for _ in range(2):
+            self._send(make_packet(PKT_DISCONNECT, token, b"\x00"))
+        self.state = FAILED
+        self.fail_reason = reason
 
     def close(self) -> None:
         self.running = False
@@ -1690,8 +1746,11 @@ class GameClient:
 
     def _on_ack(self, data: bytes, offset: int, received: float) -> None:
         (nonce, pid, tick, _rate, map_index, mode, team, token, max_players, upgrades, score_limit,
-         time_limit) = CONNECT_ACK.unpack_from(data, offset)
+         time_limit, map_crc) = CONNECT_ACK.unpack_from(data, offset)
         if nonce != self.nonce:
+            return
+        if not local_map_matches(map_index, map_crc):
+            self._abort(token, CONTENT_MISMATCH)
             return
         self.pid, self.team, self.token = pid, team, token
         self.map_index, self.mode, self.max_players = map_index, mode, max_players
@@ -1762,12 +1821,18 @@ class GameClient:
             self.predictor.reconcile(ack_cmd, data, owner_offset)
 
     def _deliver(self, event: tuple) -> None:
-        if event[0] == S.EV_MATCH and event[3] != self.map_index:
-            self.map_index = event[3]
-            self.loaded = maps.load_map(self.map_index)
-            self.predictor.set_world(self.loaded.world)
-            self.interp.clear()
-            self.map_changed = True
+        if event[0] == S.EV_MATCH:
+            map_index, map_crc = event[3], event[5]
+            event = event[:5]
+            if map_index != self.map_index or map_crc != self.loaded.data.checksum:
+                if not local_map_matches(map_index, map_crc):
+                    self._abort(self.token, CONTENT_MISMATCH)
+                    return
+                self.map_index = map_index
+                self.loaded = maps.load_map(map_index)
+                self.predictor.set_world(self.loaded.world)
+                self.interp.clear()
+                self.map_changed = True
         self.events.append(event)
         self.stats["events"] += 1
 

@@ -258,3 +258,25 @@ def test_camera_rig_feel():
     near.add_explosion_shake([0, 0, 0], [[2.0, 0, 0]], power=0.8)
     far.add_explosion_shake([0, 0, 0], [[4.0, 0, 0]], power=0.8)
     assert np.isclose(near.trauma / far.trauma, 4.0)                                    # inverse-square falloff
+
+
+def test_camera_springs_are_stable_at_any_frame_time():
+    """A 10 fps frame (level load, software rendering) must not make the recoil or landing springs diverge."""
+    from engine.controller_3d import CameraRig, spring_step
+    feet = np.zeros(3)
+    peaks = {}
+    for dt in (1.0 / 240.0, 1.0 / 60.0, 0.05, 0.1):
+        rig = CameraRig(90.0)
+        rig.add_recoil(0.02, 0.006)
+        rig.add_landing(9.0)
+        peak = 0.0
+        for _ in range(int(3.0 / dt)):
+            rig.update(dt, feet, np.zeros(3), C.MF_ON_GROUND, 0.0, 0.0, 0.0)
+            peak = max(peak, float(np.abs(rig.punch).max()))
+            assert np.all(np.isfinite(rig.punch)) and np.isfinite(rig.land_offset)
+        peaks[dt] = peak
+        assert np.abs(rig.punch).max() < 1e-4 and abs(rig.land_offset) < 1e-3       # settled after three seconds
+        assert np.all(np.abs(rig.shake_uv) <= 0.012) and np.isfinite(rig.cam_yaw) and np.isfinite(rig.cam_pitch)
+    assert peaks[0.1] <= peaks[1.0 / 60.0] * 1.5 and peaks[1.0 / 60.0] < 0.05         # same feel, never amplified
+    x, v = spring_step(np.array([1.0, -2.0]), np.zeros(2), 1.0e6, 0.0, 1.0)             # absurdly stiff, huge step
+    assert np.all(np.abs(x) <= np.array([1.0, 2.0])) and np.all(np.isfinite(v))

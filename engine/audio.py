@@ -8,12 +8,17 @@ first time the game starts (noise bursts shaped by envelopes and FFT filters,
 pitch-swept sine bodies, simple chimes), written as 16-bit mono WAV files into
 the cache directory and then played through Panda3D's audio manager.
 
-The synthesis half is pure NumPy and is unit tested headlessly.  Playback is
-optional: on a machine without an audio device Panda3D hands out null sounds
-and every ``play`` call silently does nothing.
+Loudness is staged in one place (:func:`mix_gain`): master volume, a hard
+emission ceiling per category (gunfire 0.25, explosions 0.30, ...), and for
+positional cues the inverse-square law ``Volume = Base / (d / ref)^2``.
+
+The synthesis and the mixer maths are pure NumPy / Python and are unit tested
+headlessly.  Playback is optional: on a machine without an audio device
+Panda3D hands out null sounds and every ``play`` call silently does nothing.
 """
 from __future__ import annotations
 
+import time
 import wave
 from pathlib import Path
 
@@ -200,19 +205,48 @@ def ensure_sound_files(directory: Path | None = None, force: bool = False) -> di
     return paths
 
 
+def category_of(name: str) -> str:
+    """Mixer category of a cue (every ``shot_N`` is 'weapon')."""
+    if name.startswith("shot_"):
+        return "weapon"
+    return C.AUDIO_CATEGORY.get(name, "feedback")
+
+
+def distance_falloff(distance: float, category: str) -> float:
+    """Inverse-square attenuation around the category's reference distance: ``1 / max(d / ref, 1) ** 2``."""
+    reference = C.AUDIO_REFERENCE_DISTANCE.get(category, 4.0)
+    return 1.0 / max(float(distance) / reference, 1.0) ** 2
+
+
+def mix_gain(name: str, volume: float = 1.0, master: float = 1.0, distance: float | None = None,
+             overlapping: int = 0) -> float:
+    """
+    Final linear gain of a cue.  The category ceiling (0.14 to 0.30) is the hard
+    upper bound: no combination of arguments can exceed it.
+    """
+    category = category_of(name)
+    gain = min(max(master, 0.0), 1.0) * C.AUDIO_CEILING[category] * min(max(volume, 0.0), 1.0)
+    if distance is not None:
+        gain *= distance_falloff(distance, category)
+    return gain * C.AUDIO_DUCK_FACTOR ** max(int(overlapping), 0)
+
+
 class SoundBank:
     """
-    Voice pool on top of Panda3D's audio manager (several voices per effect so
-    automatic fire overlaps cleanly).  Construct it only after the Ursina
-    application exists.
+    Voice pool on top of Panda3D's audio manager with a small mixer in front:
+    master volume (0..1), per-category emission ceilings, inverse-square
+    distance attenuation for positional cues and ducking of cues that start
+    on top of each other.  Construct it only after the Ursina application exists.
     """
 
-    def __init__(self, volume: float = 0.8, directory: Path | None = None):
-        self.volume = float(volume)
+    def __init__(self, volume: float = C.AUDIO_MASTER_DEFAULT, directory: Path | None = None):
+        self.volume = float(min(max(volume, 0.0), 1.0))
         self.voices: dict = {}
         self.cursor: dict = {}
+        self.recent: dict = {category: [] for category in C.AUDIO_CEILING}
         self.enabled = False
         self.rng = np.random.default_rng(7)
+        self.last_gain = 0.0
         try:
             from panda3d.core import Filename
             from ursina.audio import _audio_manager
@@ -226,39 +260,52 @@ class SoundBank:
             print("audio disabled:", error)
 
     def set_volume(self, volume: float) -> None:
+        """Master gain, clamped to [0, 1]."""
         self.volume = float(min(max(volume, 0.0), 1.0))
 
-    def play(self, name: str, volume: float = 1.0, pitch: float = 1.0, balance: float = 0.0, vary: float = 0.0) -> None:
-        """Play an effect on its next free voice.  ``vary`` adds random pitch variation."""
+    def _overlap(self, category: str) -> int:
+        now = time.perf_counter()
+        recent = self.recent[category]
+        recent[:] = [stamp for stamp in recent if now - stamp < C.AUDIO_DUCK_WINDOW]
+        count = len(recent)
+        recent.append(now)
+        return count
+
+    def play(self, name: str, volume: float = 1.0, pitch: float = 1.0, balance: float = 0.0, vary: float = 0.0,
+             distance: float | None = None) -> float:
+        """Play a cue on its next free voice; returns the gain that was applied (0 when skipped)."""
         pool = self.voices.get(name)
         if not self.enabled or pool is None or self.volume <= 0.0:
-            return
+            return 0.0
+        category = category_of(name)
+        gain = mix_gain(name, volume, self.volume, distance)
+        if gain < C.AUDIO_MIN_GAIN:
+            return 0.0
+        gain *= C.AUDIO_DUCK_FACTOR ** self._overlap(category)
+        self.last_gain = gain
         index = self.cursor[name]
         self.cursor[name] = (index + 1) % len(pool)
         sound = pool[index]
         if vary > 0.0:
             pitch *= 1.0 + float(self.rng.uniform(-vary, vary))
         try:
-            sound.setVolume(float(min(max(volume, 0.0), 1.0)) * self.volume)
+            sound.setVolume(float(gain))
             sound.setPlayRate(float(pitch))
             sound.setBalance(float(min(max(balance, -1.0), 1.0)))
             sound.play()
         except Exception:
             self.enabled = False
+        return gain
 
-    def play_at(self, name: str, position, listener, listener_right, volume: float = 1.0, reference: float = 9.0,
-                vary: float = 0.0) -> None:
-        """Positional playback: inverse-square style distance roll-off and left / right panning."""
+    def play_at(self, name: str, position, listener, listener_right, volume: float = 1.0, vary: float = 0.0) -> float:
+        """Positional cue: distance attenuation ``Volume = Base / (d / ref)^2`` plus left / right panning."""
         offset = np.asarray(position, dtype=np.float64) - np.asarray(listener, dtype=np.float64)
         distance = float(np.sqrt(np.dot(offset, offset)))
-        gain = volume / (1.0 + (distance / reference) ** 2)
-        if gain < 0.01:
-            return
         pan = float(np.dot(offset, listener_right)) / max(distance, 1.0e-6)
-        self.play(name, gain, 1.0, pan * 0.8, vary)
+        return self.play(name, volume, 1.0, pan * C.AUDIO_PAN_STRENGTH, vary, distance)
 
-    def shot(self, weapon: int, volume: float = 1.0) -> None:
-        self.play("shot_%d" % (int(weapon) % W.WEAPON_COUNT), volume, vary=0.035)
+    def shot(self, weapon: int, volume: float = 1.0) -> float:
+        return self.play("shot_%d" % (int(weapon) % W.WEAPON_COUNT), volume, vary=0.035)
 
-    def shot_at(self, weapon: int, position, listener, listener_right) -> None:
-        self.play_at("shot_%d" % (int(weapon) % W.WEAPON_COUNT), position, listener, listener_right, 0.9, 14.0, 0.035)
+    def shot_at(self, weapon: int, position, listener, listener_right) -> float:
+        return self.play_at("shot_%d" % (int(weapon) % W.WEAPON_COUNT), position, listener, listener_right, 1.0, 0.035)

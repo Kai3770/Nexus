@@ -1,20 +1,26 @@
 """
 NEXUS-3D-EXTREME :: engine/weapons.py
 =====================================
-Weapon data tables, upgrade effects and the deterministic weapon state machine.
+Weapon registry: turns the balance matrices of :mod:`engine.config` into
+NumPy tables, derives upgraded statistics, measures time-to-kill and runs the
+deterministic weapon state machine.
 
-Everything is table driven: ``WEAPONS`` is one structured NumPy array, the
-upgrade tracks are parallel arrays, and :func:`step_weapons` advances the
-ammunition / reload / fire-cadence state of every selected row with boolean
-masks.  The client runs the same function for its predicted player that the
-server runs authoritatively, so a shot the client predicts is a shot the
-server grants.
+All tuning lives in ``config.py`` (``WEAPON_TABLE``, ``UPGRADE_TABLE``,
+``OPERATOR_TABLE``, ``SPREAD_MATRIX``); this module contains no numbers of its
+own.  :func:`validate_balance` checks the invariants of the balancing model
+and is part of the test-suite:
+
+* every weapon, stock and fully upgraded, kills a 100 health target with torso
+  hits in 300 to 500 ms;
+* sorted by damage per trigger pull, fire interval, recoil and reload time
+  never decrease.
 
 All timing is expressed in *command ticks* of the owning player (one tick per
-processed input command), which keeps the cadence identical on both sides no
-matter how packets are batched.
+processed input command), so client prediction and the server agree exactly.
 """
 from __future__ import annotations
+
+import math
 
 import numpy as np
 
@@ -24,23 +30,11 @@ from . import config as C
 #  Weapon classes and movement states (rows / columns of the spread matrix)
 # --------------------------------------------------------------------------- #
 CLASS_AR, CLASS_SMG, CLASS_SHOTGUN, CLASS_MARKSMAN, CLASS_PISTOL, CLASS_LMG, CLASS_SNIPER = range(7)
-CLASS_NAMES = ("ASSAULT RIFLE", "SMG", "SHOTGUN", "MARKSMAN", "PISTOL", "LMG", "SNIPER")
+CLASS_NAMES = C.WEAPON_CLASSES
 
 MOVE_STAND, MOVE_WALK, MOVE_SPRINT, MOVE_CROUCH, MOVE_SLIDE, MOVE_AIR = range(6)
 MOVE_STATE_NAMES = ("STANDING", "WALKING", "SPRINTING", "CROUCHED", "SLIDING", "AIRBORNE")
-
-# Bullet Spread Matrix: multiplier on the weapon's base cone,
-# rows = weapon class, columns = movement state.
-SPREAD_MATRIX = np.array([
-    #  stand  walk  sprint crouch slide  air
-    [1.00, 1.35, 1.90, 0.72, 1.85, 2.60],   # assault rifle
-    [1.00, 1.15, 1.45, 0.80, 1.30, 1.90],   # smg
-    [1.00, 1.05, 1.20, 0.90, 1.10, 1.30],   # shotgun
-    [1.00, 1.70, 2.60, 0.60, 2.40, 3.40],   # marksman
-    [1.00, 1.20, 1.50, 0.78, 1.35, 1.90],   # pistol
-    [1.00, 1.55, 2.30, 0.62, 2.20, 3.10],   # lmg
-    [1.00, 1.90, 3.00, 0.55, 2.80, 3.80],   # sniper
-], dtype=np.float64)
+SPREAD_MATRIX = np.array(C.SPREAD_MATRIX, dtype=np.float64)
 
 _DEG = np.pi / 180.0
 
@@ -55,75 +49,55 @@ WEAPON_DTYPE = np.dtype([
     ("unlock_cost", np.float64), ("unlock_level", np.int32), ("tier", np.float64),
 ])
 
-# key, display name, short description
-WEAPON_INFO = (
-    ("vanguard", "VK-9 VANGUARD", "Balanced full-auto rifle. The corporate standard issue."),
-    ("hornet", "HX-4 HORNET", "Feather-light SMG that shreds up close and on the move."),
-    ("breacher", "BREACHER-12", "Pump shotgun. Eight pellets, one very bad day."),
-    ("longbow", "LONGBOW DMR", "Semi-auto marksman rifle. Two taps at any range."),
-    ("sidekick", "P9 SIDEKICK", "Reliable sidearm with a fast draw."),
-    ("bulwark", "BULWARK LMG", "75 round belt. Hold the lane, never reload."),
-    ("aurora", "AURORA RAIL", "Capacitor driven rail rifle. One beam, one elimination."),
-)
-WEAPON_KEYS = tuple(info[0] for info in WEAPON_INFO)
-WEAPON_NAMES = tuple(info[1] for info in WEAPON_INFO)
-WEAPON_DESCRIPTIONS = tuple(info[2] for info in WEAPON_INFO)
-WEAPON_COUNT = len(WEAPON_INFO)
-WEAPON_INDEX = {key: i for i, key in enumerate(WEAPON_KEYS)}
-DEFAULT_LOADOUT = (WEAPON_INDEX["vanguard"], WEAPON_INDEX["sidekick"])
 
-_T = C.TICK_RATE
-WEAPONS = np.array([
-    # klass          auto   dmg  pel  intvl  mag  reload     swap  hip          ads          bloom/shot   bloom max   recover     r0     r1    rmin  rec pitch    rec yaw      recov mob   zoom  cost     lvl tier
-    (CLASS_AR,       True,  26.0, 1,  6.0,   30,  2.1 * _T,  18.0, 2.2 * _DEG,  0.25 * _DEG, 0.35 * _DEG, 2.6 * _DEG, 9.0 * _DEG,  28.0,  60.0, 0.60, 0.62 * _DEG, 0.28 * _DEG, 7.0, 1.00, 1.35, 0.0,     1,  1.0),
-    (CLASS_SMG,      True,  19.0, 1,  4.0,   32,  1.7 * _T,  14.0, 2.6 * _DEG,  0.60 * _DEG, 0.30 * _DEG, 3.0 * _DEG, 11.0 * _DEG, 14.0,  34.0, 0.50, 0.42 * _DEG, 0.36 * _DEG, 9.0, 1.08, 1.20, 0.0,     1,  1.0),
-    (CLASS_SHOTGUN,  False, 15.0, 8,  44.0,  6,   2.8 * _T,  20.0, 4.6 * _DEG,  3.60 * _DEG, 0.0,         0.0,        0.0,         7.0,   20.0, 0.20, 2.60 * _DEG, 0.80 * _DEG, 5.0, 0.98, 1.15, 2500.0,  3,  1.6),
-    (CLASS_MARKSMAN, False, 58.0, 1,  16.0,  12,  2.4 * _T,  20.0, 3.4 * _DEG,  0.08 * _DEG, 0.90 * _DEG, 2.8 * _DEG, 6.0 * _DEG,  55.0, 110.0, 0.75, 1.50 * _DEG, 0.45 * _DEG, 5.5, 0.96, 2.20, 6000.0,  6,  2.4),
-    (CLASS_PISTOL,   False, 30.0, 1,  7.0,   12,  1.3 * _T,  10.0, 1.6 * _DEG,  0.30 * _DEG, 0.55 * _DEG, 2.4 * _DEG, 10.0 * _DEG, 16.0,  38.0, 0.50, 0.90 * _DEG, 0.35 * _DEG, 9.0, 1.10, 1.15, 0.0,     1,  0.8),
-    (CLASS_LMG,      True,  31.0, 1,  7.0,   75,  4.3 * _T,  26.0, 3.6 * _DEG,  0.50 * _DEG, 0.22 * _DEG, 3.4 * _DEG, 7.0 * _DEG,  34.0,  75.0, 0.65, 0.52 * _DEG, 0.42 * _DEG, 5.0, 0.90, 1.35, 15000.0, 10, 3.6),
-    (CLASS_SNIPER,   False, 120.0, 1, 70.0,  5,   3.0 * _T,  28.0, 7.5 * _DEG,  0.0,         0.0,         0.0,        0.0,         120.0, 200.0, 0.85, 4.20 * _DEG, 0.60 * _DEG, 3.5, 0.92, 4.00, 40000.0, 15, 5.5),
-], dtype=WEAPON_DTYPE)
+def _build_weapons():
+    """Convert ``config.WEAPON_TABLE`` rows into the structured table used at run time."""
+    rows = [dict(zip(C.WEAPON_COLUMNS, row)) for row in C.WEAPON_TABLE]
+    table = np.zeros(len(rows), dtype=WEAPON_DTYPE)
+    for index, row in enumerate(rows):
+        burst = row["damage"] * row["pellets"]                       # damage per trigger pull
+        climb = C.RECOIL_PITCH_PER_DAMAGE * burst
+        table[index] = (
+            row["klass"], row["auto"], row["damage"], row["pellets"], row["interval"], row["mag"],
+            row["reload_s"] * C.TICK_RATE, row["swap"],
+            row["hip_deg"] * _DEG, row["ads_deg"] * _DEG,
+            row["bloom_shot_deg"] * _DEG, row["bloom_max_deg"] * _DEG, row["bloom_recover_deg"] * _DEG,
+            row["range_start"], row["range_end"], row["range_min"],
+            climb, climb * C.RECOIL_YAW_RATIO, row["recoil_recover"],
+            row["mobility"], row["ads_zoom"], row["unlock_cost"], row["unlock_level"], row["tier"])
+    return rows, table
+
+
+_ROWS, WEAPONS = _build_weapons()
+WEAPON_KEYS = tuple(row["key"] for row in _ROWS)
+WEAPON_NAMES = tuple(row["name"] for row in _ROWS)
+WEAPON_DESCRIPTIONS = tuple(row["description"] for row in _ROWS)
+WEAPON_COUNT = len(_ROWS)
+WEAPON_INDEX = {key: i for i, key in enumerate(WEAPON_KEYS)}
+DEFAULT_LOADOUT = tuple(WEAPON_INDEX[key] for key in C.DEFAULT_LOADOUT_KEYS)
 
 # --------------------------------------------------------------------------- #
-#  Per-weapon upgrade tracks (levels are bytes on the wire)
+#  Upgrade tracks (levels are bytes on the wire)
 # --------------------------------------------------------------------------- #
 UPG_DAMAGE, UPG_FIRE_RATE, UPG_MAGAZINE, UPG_RELOAD, UPG_STABILIZER, UPG_LASER, UPG_BARREL, UPG_STOCK = range(8)
-UPGRADE_KEYS = ("damage", "fire_rate", "magazine", "reload", "stabilizer", "laser", "barrel", "stock")
-UPGRADE_NAMES = ("DAMAGE", "FIRE RATE", "MAGAZINE", "RELOAD SPEED", "STABILIZER", "LASER MODULE",
-                 "LONG BARREL", "FEATHER STOCK")
-UPGRADE_DESCRIPTIONS = (
-    "+5% bullet damage per level",
-    "-2% time between shots per level",
-    "+8% magazine capacity per level",
-    "-4% reload time per level",
-    "Attachment: -9% recoil per level",
-    "Attachment: -8% hip-fire spread per level",
-    "Attachment: +10% damage range per level",
-    "Attachment: +1.5% movement speed per level",
-)
-UPGRADE_COUNT = len(UPGRADE_KEYS)
-UPGRADE_MAX = np.array([20, 15, 10, 10, 5, 5, 5, 5], dtype=np.int64)
-UPGRADE_BASE_COST = np.array([150.0, 220.0, 180.0, 160.0, 400.0, 350.0, 450.0, 300.0], dtype=np.float64)
-UPGRADE_COST_MULT = np.array([1.32, 1.38, 1.45, 1.40, 1.85, 1.80, 1.90, 1.75], dtype=np.float64)
-UPGRADE_EFFECT = np.array([0.05, 0.02, 0.08, 0.04, 0.09, 0.08, 0.10, 0.015], dtype=np.float64)
+UPGRADE_KEYS = tuple(row[0] for row in C.UPGRADE_TABLE)
+UPGRADE_NAMES = tuple(row[1] for row in C.UPGRADE_TABLE)
+UPGRADE_DESCRIPTIONS = tuple(row[6] for row in C.UPGRADE_TABLE)
+UPGRADE_COUNT = len(C.UPGRADE_TABLE)
+UPGRADE_MAX = np.array([row[2] for row in C.UPGRADE_TABLE], dtype=np.int64)
+UPGRADE_EFFECT = np.array([row[3] for row in C.UPGRADE_TABLE], dtype=np.float64)
+UPGRADE_BASE_COST = np.array([row[4] for row in C.UPGRADE_TABLE], dtype=np.float64)
+UPGRADE_COST_MULT = np.array([row[5] for row in C.UPGRADE_TABLE], dtype=np.float64)
 
-# --------------------------------------------------------------------------- #
-#  Operator (global) upgrades
-# --------------------------------------------------------------------------- #
 OP_PLATING, OP_CAPACITOR, OP_BOUNTY, OP_NANITES = range(4)
-OPERATOR_KEYS = ("plating", "capacitor", "bounty", "nanites")
-OPERATOR_NAMES = ("REINFORCED PLATING", "PULSE CAPACITOR", "BOUNTY UPLINK", "MEDIC NANITES")
-OPERATOR_DESCRIPTIONS = (
-    "+5 maximum health per level",
-    "-5% pulse grenade cooldown per level",
-    "+10% combat credits per level",
-    "-6% health regeneration delay per level",
-)
-OPERATOR_COUNT = len(OPERATOR_KEYS)
-OPERATOR_MAX = np.array([10, 10, 20, 8], dtype=np.int64)
-OPERATOR_BASE_COST = np.array([500.0, 650.0, 300.0, 450.0], dtype=np.float64)
-OPERATOR_COST_MULT = np.array([1.60, 1.55, 1.42, 1.65], dtype=np.float64)
-OPERATOR_EFFECT = np.array([5.0, 0.05, 0.10, 0.06], dtype=np.float64)
+OPERATOR_KEYS = tuple(row[0] for row in C.OPERATOR_TABLE)
+OPERATOR_NAMES = tuple(row[1] for row in C.OPERATOR_TABLE)
+OPERATOR_DESCRIPTIONS = tuple(row[6] for row in C.OPERATOR_TABLE)
+OPERATOR_COUNT = len(C.OPERATOR_TABLE)
+OPERATOR_MAX = np.array([row[2] for row in C.OPERATOR_TABLE], dtype=np.int64)
+OPERATOR_EFFECT = np.array([row[3] for row in C.OPERATOR_TABLE], dtype=np.float64)
+OPERATOR_BASE_COST = np.array([row[4] for row in C.OPERATOR_TABLE], dtype=np.float64)
+OPERATOR_COST_MULT = np.array([row[5] for row in C.OPERATOR_TABLE], dtype=np.float64)
 
 LOADOUT_SLOTS = 2
 LOADOUT_BLOB_SIZE = LOADOUT_SLOTS * (1 + UPGRADE_COUNT) + OPERATOR_COUNT + 1     # bytes on the wire
@@ -235,6 +209,74 @@ def spread_angle(klass, spread_hip, spread_ads, bloom, mflags, horizontal_speed)
     factor = SPREAD_MATRIX[np.asarray(klass, dtype=np.int64), movement_state(mflags, horizontal_speed)]
     factor = np.where(ads, 1.0 + (factor - 1.0) * 0.35, factor)
     return base * factor + np.where(ads, np.asarray(bloom) * 0.5, bloom)
+
+
+# --------------------------------------------------------------------------- #
+#  Balance model: time-to-kill and invariants
+# --------------------------------------------------------------------------- #
+def shots_to_kill(damage_per_trigger: float, health: float = C.BASE_HEALTH) -> int:
+    """Trigger pulls needed to remove ``health`` when every round (pellet) lands."""
+    return int(math.ceil(health / damage_per_trigger - 1.0e-9))
+
+
+def time_to_kill_ms(weapon: int, levels=None, health: float = C.BASE_HEALTH, zone: int = C.ZONE_TORSO) -> float:
+    """
+    Milliseconds from the first round to the killing round at maximum cadence.
+    Uses the same fractional-carry schedule as :func:`step_weapons`: round ``k``
+    leaves on tick ``ceil(k * interval)``.
+    """
+    if levels is None:
+        levels = np.zeros(UPGRADE_COUNT, dtype=np.int64)
+    stats = derive_stats(int(weapon), levels)
+    burst = float(stats["damage"]) * int(stats["pellets"]) * float(C.ZONE_MULTIPLIER[zone])
+    rounds = shots_to_kill(burst, health)
+    return math.ceil((rounds - 1) * float(stats["interval"]) - 1.0e-9) * C.TICK_MS
+
+
+def balance_report() -> list:
+    """One dictionary per weapon with the numbers a designer cares about (stock and fully upgraded)."""
+    report = []
+    for index in range(WEAPON_COUNT):
+        stock = derive_stats(index, np.zeros(UPGRADE_COUNT, dtype=np.int64))
+        burst = float(stock["damage"]) * int(stock["pellets"])
+        report.append({
+            "key": WEAPON_KEYS[index], "class": CLASS_NAMES[int(stock["klass"])], "burst_damage": burst,
+            "rpm": 60.0 * C.TICK_RATE / float(stock["interval"]), "shots_to_kill": shots_to_kill(burst),
+            "ttk_ms": time_to_kill_ms(index), "ttk_max_ms": time_to_kill_ms(index, UPGRADE_MAX),
+            "ttk_head_ms": time_to_kill_ms(index, zone=C.ZONE_HEAD),
+            "reload_s": float(stock["reload_ticks"]) / C.TICK_RATE,
+            "recoil_deg": float(np.degrees(stock["recoil_pitch"])),
+            "dps": burst * C.TICK_RATE / float(stock["interval"]),
+        })
+    return report
+
+
+def validate_balance() -> list:
+    """
+    Check the invariants of the balancing model.  Returns a list of violations
+    (empty when the tables are sound).
+    """
+    problems = []
+    report = balance_report()
+    for row in report:
+        for label in ("ttk_ms", "ttk_max_ms"):
+            if not C.TTK_MIN_MS - 1.0e-6 <= row[label] <= C.TTK_MAX_MS + 1.0e-6:
+                problems.append("%s %s = %.0f ms is outside %.0f-%.0f ms" % (
+                    row["key"], label, row[label], C.TTK_MIN_MS, C.TTK_MAX_MS))
+    for index in range(WEAPON_COUNT):
+        stock = float(WEAPONS["damage"][index]) * int(WEAPONS["pellets"][index])
+        best = float(derive_stats(index, UPGRADE_MAX)["damage"]) * int(WEAPONS["pellets"][index])
+        if shots_to_kill(stock) != shots_to_kill(best):
+            problems.append("%s: damage upgrades change the shots-to-kill" % WEAPON_KEYS[index])
+    order = sorted(report, key=lambda row: row["burst_damage"])
+    for weaker, stronger in zip(order, order[1:]):
+        if stronger["rpm"] > weaker["rpm"] + 1.0e-9:
+            problems.append("%s hits harder than %s but also fires faster" % (stronger["key"], weaker["key"]))
+        if stronger["recoil_deg"] < weaker["recoil_deg"] - 1.0e-9:
+            problems.append("%s hits harder than %s but recoils less" % (stronger["key"], weaker["key"]))
+        if stronger["reload_s"] < weaker["reload_s"] - 1.0e-9:
+            problems.append("%s hits harder than %s but reloads faster" % (stronger["key"], weaker["key"]))
+    return problems
 
 
 # --------------------------------------------------------------------------- #

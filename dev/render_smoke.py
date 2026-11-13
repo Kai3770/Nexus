@@ -1,13 +1,22 @@
-"""Renders a scripted scene with every renderer feature and saves screenshots (run under xvfb-run when headless)."""
+"""
+Renders a scripted scene with every renderer feature and saves screenshots.
+
+    xvfb-run -a -s "-screen 0 1280x720x24" python dev/render_smoke.py OUT_DIR [MAP] [QUALITY 0-3]
+
+Writes ``<map>_<frame>.png`` (first-person shots with effects), ``<map>_board.png``
+(scoreboard) and ``<map>_overview.png`` (bird's-eye view for shadows and the skyline).
+"""
 import math
 import os
 import sys
+import time
 
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUT = sys.argv[1] if len(sys.argv) > 1 else "."
 MAP = sys.argv[2] if len(sys.argv) > 2 else "datacore"
+QUALITY = int(sys.argv[3]) if len(sys.argv) > 3 else 2
 
 from ursina import Ursina, application, camera, window                      # noqa: E402
 
@@ -18,15 +27,17 @@ window.exit_button.enabled = False
 from engine import config as C, maps, mathx as M, network_lan as N, renderer as R, weapons as W   # noqa: E402
 from engine.controller_3d import CameraRig                                                        # noqa: E402
 
-scene_renderer = R.SceneRenderer()
-hud = R.HUD()
+started = time.perf_counter()
+scene_renderer = R.SceneRenderer(QUALITY, dynamic_resolution=False, fps_limit=0)
+hud = R.HUD(scene_renderer.world.fx_shader)
 loaded = maps.load_map(MAP)
 scene_renderer.load_map(loaded.data)
-print("post enabled:", scene_renderer.post.enabled, "triangles:", scene_renderer.world.triangle_count)
+print("load %.2fs" % (time.perf_counter() - started), scene_renderer.describe(), scene_renderer.world.stats)
 
 view = N.EntityView(C.MAX_PLAYERS)
-spots = {"datacore": ((-21.0, 0.0, 1.5), 90.0), "skybridge": ((-24.0, 0.0, 2.0), 90.0), "crucible": ((-15.0, 0.0, -6.0), 60.0)}
-feet, yaw_deg = spots[MAP]
+spots = {"datacore": ((-21.0, 0.0, 1.5), 90.0), "skybridge": ((-24.0, 0.0, 2.0), 90.0), "crucible": ((-15.0, 0.0, -6.0), 60.0),
+         "terminal": ((-24.0, 0.0, 3.0), 80.0), "atrium": ((-19.0, 0.0, 2.0), 85.0)}
+feet, yaw_deg = spots.get(MAP, (tuple(loaded.data.spawn_pos[0]), math.degrees(loaded.data.spawn_yaw[0])))
 feet = np.array(feet)
 yaw = math.radians(yaw_deg)
 fwd, right = M.forward_vector(yaw), M.right_vector(yaw)
@@ -51,6 +62,10 @@ hud.push_kill("OPERATOR  [VK-9 VANGUARD]  BOT KODO")
 hud.push_kill("BOT NOVA  [HEADSHOT]  BOT RIVET", R.HUD_CRIMSON)
 hud.push_reward("+100  ELIMINATION")
 hud.set_hint("WASD move   SHIFT sprint   C slide   SPACE jump   G grenade   R reload   Q swap   TAB scores")
+
+
+def shot(name: str) -> None:
+    application.base.screenshot(namePrefix=os.path.join(OUT, "%s_%s.png" % (MAP, name)), defaultFilename=False)
 
 
 def update():
@@ -81,20 +96,36 @@ def update():
         hud.damage_from(0.9)
         scene_renderer.fx_damage_number(view.pos[1] + np.array([0.0, 1.0, 0.0]), 112, killed=True)
     rig.update(dt, feet, right * 2.0, C.MF_ON_GROUND, 0.0, yaw, -0.04, (0.0, 0.0))
-    aim = rig.consume_aim_kick()
+    rig.consume_aim_kick()
     R.apply_camera(rig)
     scene_renderer.post.update(dt, rig, 0.64, True)
     scene_renderer.viewmodel.update(dt, rig, scene_renderer.lights.flash_level)
-    scene_renderer.render(dt, state["time"], rig.cam_pos, rig.cam_yaw, rig.cam_pitch, view, -1,
+    cam_pos, cam_yaw, cam_pitch = rig.cam_pos, rig.cam_yaw, rig.cam_pitch
+    if frame >= 47:                                                     # bird's-eye view of the whole arena
+        data = loaded.data
+        extent = float(np.max(data.bounds_max - data.bounds_min))
+        cam_pos = np.array([data.bounds_min[0] * 0.55, data.bounds_max[1] + extent * 0.30, data.bounds_min[2] * 1.25])
+        look = M.normalize(np.array([0.0, 1.0, 0.0]) - cam_pos)
+        cam_yaw, cam_pitch = math.atan2(look[0], look[2]), math.asin(look[1])
+        camera.position = tuple(float(v) for v in cam_pos)
+        camera.rotation = (-math.degrees(cam_pitch), math.degrees(cam_yaw), 0.0)
+        camera.fov = 90.0
+        scene_renderer.viewmodel.set_visible(False)
+        hud.set_visible(False)
+    scene_renderer.render(dt, state["time"], cam_pos, cam_yaw, cam_pitch, view, -1,
                           np.array([feet + fwd * 5.0 + right * -1.0 + np.array([0.0, 0.6, 0.0])]))
     hud.set_crosshair(math.radians(2.2) + 0.01 * (frame % 10 < 5), R.vertical_fov(camera.fov), 1.0, dt)
     hud.update(dt)
     if frame in (9, 21, 27, 40):
-        application.base.screenshot(namePrefix=os.path.join(OUT, "%s_%02d.png" % (MAP, frame)), defaultFilename=False)
+        shot("%02d" % frame)
     if frame == 43:
-        hud.set_scoreboard(True, [("OPERATOR", 4, 1, 450, 3, "> "), ("BOT NOVA", 3, 2, 300, 0, "  ")], "TEAM DEATHMATCH - DATACORE")
+        hud.set_scoreboard(True, [("OPERATOR", 4, 1, 450, 3, "* "), ("BOT NOVA", 3, 2, 300, 0, "  ")],
+                           "TEAM DEATHMATCH - %s" % loaded.data.name)
     if frame == 46:
-        application.base.screenshot(namePrefix=os.path.join(OUT, "%s_board.png" % MAP), defaultFilename=False)
+        shot("board")
+    if frame == 50:
+        shot("overview")
+        print("final", scene_renderer.describe())
         application.quit()
 
 

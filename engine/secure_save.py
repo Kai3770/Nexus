@@ -209,8 +209,10 @@ def format_duration(seconds: float) -> str:
 #  Profile data
 # =========================================================================== #
 DEFAULT_SETTINGS = {
-    "sensitivity": 1.0, "fov": C.BASE_FOV, "volume": 0.8, "invert_y": False, "show_fps": True,
+    "sensitivity": 1.0, "fov": C.BASE_FOV, "volume": C.AUDIO_MASTER_DEFAULT, "invert_y": False, "show_fps": True,
     "bot_count": 7, "bot_difficulty": 1, "map": "datacore", "mode": C.MODE_TDM,
+    "quality": C.QUALITY_DEFAULT, "dynamic_resolution": C.DYNAMIC_RESOLUTION_DEFAULT,
+    "vsync": C.VSYNC_DEFAULT, "fps_limit": C.FPS_LIMIT_DEFAULT,
 }
 STAT_KEYS = ("kills", "deaths", "headshots", "shots", "hits", "damage", "matches", "wins",
              "best_streak", "grenade_kills", "playtime", "credits_from_sponsors", "credits_from_combat")
@@ -299,6 +301,8 @@ class Profile:
         p.settings["volume"] = float(np.clip(p.settings["volume"], 0.0, 1.0))
         p.settings["bot_count"] = int(np.clip(p.settings["bot_count"], 0, C.MAX_PLAYERS - 1))
         p.settings["bot_difficulty"] = int(np.clip(p.settings["bot_difficulty"], 0, 2))
+        p.settings["quality"] = int(np.clip(p.settings["quality"], 0, len(C.GRAPHICS_PRESETS) - 1))
+        p.settings["fps_limit"] = int(np.clip(p.settings["fps_limit"], 0, 360))
         p.integrity_strikes = max(int(raw.get("integrity_strikes", 0)), 0)
         return p
 

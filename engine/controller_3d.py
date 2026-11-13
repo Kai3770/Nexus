@@ -1230,6 +1230,18 @@ class HitboxSet:
 # =========================================================================== #
 #  5. CAMERA RIG (client side view feel)
 # =========================================================================== #
+def spring_step(position, velocity, stiffness: float, damping: float, dt: float):
+    """
+    One step of the damped spring ``x'' = -k x - c x'`` with implicit (backward)
+    Euler.  Unlike the explicit update it is stable for every ``dt``: a frame
+    of 100 ms (a level load, a slow software renderer) can no longer make a
+    stiff spring oscillate with growing amplitude.  Returns the new
+    ``(position, velocity)``; works on scalars and NumPy arrays alike.
+    """
+    velocity = (velocity - dt * stiffness * position) / (1.0 + dt * damping + dt * dt * stiffness)
+    return position + velocity * dt, velocity
+
+
 class CameraRig:
     """
     Converts the predicted body state into a first-person camera pose and a
@@ -1350,9 +1362,8 @@ class CameraRig:
 
         # landing spring (critically damped) -----------------------------------
         stiffness = 190.0
-        damping = 2.0 * np.sqrt(stiffness)
-        self.land_velocity += (-stiffness * self.land_offset - damping * self.land_velocity) * dt
-        self.land_offset += self.land_velocity * dt
+        self.land_offset, self.land_velocity = spring_step(self.land_offset, self.land_velocity, stiffness,
+                                                           2.0 * np.sqrt(stiffness), dt)
         self.land_offset = float(np.clip(self.land_offset, -C.LAND_DIP * 2.0, 0.05))
         self.step_offset = float(M.damp(self.step_offset, 0.0, 14.0, dt))
 
@@ -1362,9 +1373,8 @@ class CameraRig:
         self.recoil_current += step
         self._aim_delta += step
         punch_k = 260.0
-        punch_c = 2.0 * np.sqrt(punch_k) * 0.85
-        self.punch_velocity += (-punch_k * self.punch - punch_c * self.punch_velocity) * dt
-        self.punch += self.punch_velocity * dt
+        self.punch, self.punch_velocity = spring_step(self.punch, self.punch_velocity, punch_k,
+                                                      2.0 * np.sqrt(punch_k) * 0.85, dt)
         self.kickback = float(M.damp(self.kickback, 0.0, 16.0, dt))
 
         # explosion / damage shake ----------------------------------------------

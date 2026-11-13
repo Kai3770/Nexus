@@ -1,0 +1,6 @@
+cache/
+saves/
+__pycache__/
+*.pyc
+.pytest_cache/
+checkpoints/

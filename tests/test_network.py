@@ -6,6 +6,7 @@ import numpy as np
 import helpers  # noqa: F401
 
 from engine import config as C
+from engine import maps
 from engine import mathx as M
 from engine import network_lan as N
 from engine import simulation as S
@@ -68,6 +69,9 @@ def test_event_codec_round_trip():
     assert N.decode_event(N.encode_event(events[6]), 0)[0] == (S.EV_GRENADE, 7, 1, (0.0, 1.0, 2.0), (5.0, 6.0, -7.0), 96, 12345)
     spawn = N.decode_event(N.encode_event(events[3]), 0)[0]
     assert abs(spawn[3] - 1.5) < 1e-3
+    assert N.decode_event(N.encode_event(events[8]), 0)[0] == (S.EV_MATCH, 2, 0, 1, 0, 0)
+    stamped = events[8] + (0xCAFEF00D,)                                       # the server appends the arena checksum
+    assert N.decode_event(N.encode_event(stamped), 0)[0] == stamped
 
 
 def test_beacon_is_sealed_and_validated():
@@ -75,6 +79,7 @@ def test_beacon_is_sealed_and_validated():
     info = N.decode_beacon(datagram, "10.0.0.5")
     assert (info.name, info.port, info.players, info.max_players, info.bots, info.uid) == ("FLOOR 3 ARENA", 28016, 2, 12, 6, 0xDEADBEEF)
     assert info.compatible and info.map_name == "SKYBRIDGE" and info.mode_name == C.MODE_NAMES[0]
+    assert info.has_map and info.joinable and info.map_crc == maps.get_map_data(1).checksum
     assert b"FLOOR" not in datagram                                           # encrypted on the wire
     forged = bytearray(datagram)
     forged[-1] ^= 1
@@ -334,4 +339,72 @@ def test_server_refuses_wrong_protocol_and_full_house():
     finally:
         first.disconnect()
         second.close()
+        server.stop()
+
+
+GHOST_ARENA = {
+    "name": "GHOST", "mirror": True,
+    "center": [(0.0, -1.0, 0.0, 24.0, 1.0, 16.0, "floor", -1), (0.0, 0.0, 0.0, 2.0, 1.2, 2.0, "crate", -1)],
+    "half": [(-10.0, 0.0, -3.0, 1.0, 1.0, 1.0, "spawn", 0), (-10.0, 0.0, 0.0, 1.0, 1.0, 1.0, "spawn", 0),
+             (-10.0, 0.0, 3.0, 1.0, 1.0, 1.0, "spawn", 0), (-6.0, 0.0, 4.0, 3.0, 2.0, 0.5, "brick", -1)],
+}
+
+
+def test_client_refuses_an_arena_it_does_not_have():
+    maps.register_map("ghost", GHOST_ARENA)
+    server = None
+    client = make_client("visitor")
+    try:
+        server = N.host_local_game(N.ServerConfig(name="MODDED", map_key="ghost", bot_fill=2, beacon=False, port=28150))
+        hosted_crc = server.world.loaded.data.checksum
+        info = N.decode_beacon(server._beacon_datagram(), "127.0.0.1")
+        assert info.has_map and info.joinable and info.map_name == "GHOST" and info.map_crc == hosted_crc
+        # the "client installation" now holds a different version of that arena
+        maps.register_map("ghost", dict(GHOST_ARENA, half=GHOST_ARENA["half"][:3]))
+        info = N.decode_beacon(server._beacon_datagram(), "127.0.0.1")
+        assert info.compatible and not info.has_map and not info.joinable and info.map_name == "CUSTOM ARENA"
+        client.connect("127.0.0.1", server.port)
+        deadline = time.time() + 3.0
+        while time.time() < deadline and client.state == N.CONNECTING:
+            client.update()
+            time.sleep(0.01)
+        assert client.state == N.FAILED and client.fail_reason == N.CONTENT_MISMATCH
+        deadline = time.time() + 2.0
+        while time.time() < deadline and server.describe()["humans"]:
+            time.sleep(0.02)
+        assert server.describe()["humans"] == 0                                 # the slot was handed back at once
+    finally:
+        client.close()
+        if server is not None:
+            server.stop()
+        maps.unregister_map("ghost")
+    assert "ghost" not in maps.MAP_KEYS
+
+
+
+def test_a_stalled_main_thread_does_not_lose_the_connection():
+    """Baking an arena blocks the client's main thread; the receive thread keeps the session alive meanwhile."""
+    original = C.CONNECTION_TIMEOUT, C.KEEPALIVE_INTERVAL
+    C.CONNECTION_TIMEOUT, C.KEEPALIVE_INTERVAL = 0.6, 0.15
+    server = N.host_local_game(N.ServerConfig(name="STALL", map_key="crucible", bot_fill=2, beacon=False, port=28160))
+    client = make_client("loader")
+    try:
+        client.connect("127.0.0.1", server.port)
+        deadline = time.time() + 3.0
+        while time.time() < deadline and client.state != N.CONNECTED:
+            client.update()
+            time.sleep(0.01)
+        assert client.state == N.CONNECTED
+        time.sleep(1.5)                                                        # no update(), no commands: "loading"
+        client.update()
+        assert client.state == N.CONNECTED, client.fail_reason
+        assert server.describe()["humans"] == 1 and client.stats.get("keepalives", 0) >= 5
+        for _ in range(30):                                                    # and play simply continues afterwards
+            client.update()
+            client.send_command(C.BTN_FORWARD, 0.0, 0.0)
+            time.sleep(C.TICK_DT)
+        assert client.state == N.CONNECTED and client.predictor.corrections < 30
+    finally:
+        C.CONNECTION_TIMEOUT, C.KEEPALIVE_INTERVAL = original
+        client.disconnect()
         server.stop()

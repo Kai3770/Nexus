@@ -25,6 +25,7 @@ import math
 import time
 
 import numpy as np
+from panda3d.core import ClockObject
 from ursina import application, camera, held_keys, mouse
 
 from . import config as C
@@ -36,7 +37,8 @@ from . import secure_save as SS
 from . import simulation as S
 from . import weapons as W
 from .audio import SoundBank
-from .controller_3d import CameraRig, eye_height
+from .controller_3d import CameraRig
+from .pacing import QualityGovernor
 from .menus import MenuManager
 
 STATE_MENU, STATE_CONNECTING, STATE_PLAYING = range(3)
@@ -119,9 +121,11 @@ class NexusGame:
         self.pm = profile_manager
         self.settings = profile_manager.profile.settings
         self.audio = SoundBank(self.settings["volume"])
-        self.scene = R.SceneRenderer()
-        self.hud = R.HUD()
+        self.scene = R.SceneRenderer(int(self.settings["quality"]), bool(self.settings["dynamic_resolution"]),
+                                     float(self.settings["fps_limit"]))
+        self.hud = R.HUD(self.scene.world.fx_shader)
         self.hud.set_visible(False)
+        self.governor = QualityGovernor()
         self.rig = CameraRig(self.settings["fov"])
         self.server = None
         self.client = None
@@ -156,7 +160,6 @@ class NexusGame:
         self.last_corrections = 0
         self.backdrop_map = ""
         self.menus = MenuManager(self)
-        self._load_backdrop()
         self.menus.show("main")
         mouse.locked = False
         status = profile_manager.load_status
@@ -172,11 +175,31 @@ class NexusGame:
     #  Services used by the menus
     # ================================================================== #
     def play_ui(self, name: str) -> None:
-        self.audio.play(name, 0.6)
+        self.audio.play(name)
 
     def apply_settings(self) -> None:
         self.audio.set_volume(self.settings["volume"])
         self.rig.base_fov = float(self.settings["fov"])
+        self.apply_graphics()
+
+    def apply_graphics(self) -> None:
+        """Graphics preset, frame limiter and dynamic resolution from the profile settings."""
+        limit = float(self.settings["fps_limit"])
+        clock = ClockObject.getGlobalClock()
+        if limit > 0.0:
+            clock.setMode(ClockObject.MLimited)
+            clock.setFrameRate(limit)
+        else:
+            clock.setMode(ClockObject.MNormal)
+        scene = self.scene
+        if int(self.settings["quality"]) != scene.quality:
+            scene.set_quality(int(self.settings["quality"]))
+        if bool(self.settings["dynamic_resolution"]) != scene.resolution.enabled or limit != scene.fps_limit:
+            scene.set_pacing(bool(self.settings["dynamic_resolution"]), limit)
+
+    def _set_picking(self, enabled: bool) -> None:
+        """Ursina ray-casts the cursor against the UI every frame; that is only needed while a menu is open."""
+        mouse.update_step = 1 if enabled else 1.0e9
 
     def ensure_browser(self) -> None:
         if self.browser is None:
@@ -224,6 +247,7 @@ class NexusGame:
         self.paused = False
         self.menus.hide()
         mouse.locked = True
+        self._set_picking(False)
 
     def leave_match(self) -> None:
         self._shutdown_session()
@@ -232,6 +256,7 @@ class NexusGame:
         self.hud.set_visible(False)
         self.scene.viewmodel.set_visible(False)
         mouse.locked = False
+        self._set_picking(True)
         self.pm.save()
         self._load_backdrop()
         self.menus.show("main")
@@ -264,6 +289,7 @@ class NexusGame:
                 else:
                     self.paused = True
                     mouse.locked = False
+                    self._set_picking(True)
                     self.menus.show("pause")
             elif not self.paused and key in KEY_LATCH:
                 self.latched |= KEY_LATCH[key]
@@ -286,11 +312,21 @@ class NexusGame:
     # ================================================================== #
     def update(self) -> None:
         now = time.perf_counter()
-        dt = min(max(now - self.last_frame, 1.0e-4), 0.1)
+        elapsed = now - self.last_frame
+        dt = min(max(elapsed, 1.0e-4), C.MAX_FRAME_DT)
         self.last_frame = now
         self.clock += dt
         self.frame += 1
         self.fps += (1.0 / dt - self.fps) * 0.05
+        self.scene.end_frame(elapsed)                         # dynamic resolution follows the real frame time
+        if self.governor.update(self.scene.resolution, self.scene.quality, elapsed):
+            self.pm.set_setting("quality", self.scene.quality - 1)
+            self.apply_graphics()
+            note = "Graphics quality lowered to %s to hold the frame rate" % C.QUALITY_NAMES[self.scene.quality]
+            if self.state == STATE_PLAYING:
+                self.hud.push_reward(note, R.HUD_DIM)
+            else:
+                self.menus.notify(note, 6.0)
         self.menus.update(dt)
         if self.state == STATE_MENU:
             self._update_backdrop(dt)
@@ -318,6 +354,8 @@ class NexusGame:
             self.backdrop_map = key
 
     def _update_backdrop(self, dt: float) -> None:
+        if self.state == STATE_MENU:
+            self._load_backdrop()                 # lazy: a direct --solo / --connect start never bakes the menu arena
         self.orbit += dt * 0.07
         radius, height = 30.0, 15.0
         cam = np.array([math.sin(self.orbit) * radius, height, math.cos(self.orbit) * radius])
@@ -352,6 +390,7 @@ class NexusGame:
         self.prev_pos = store.move.pos[0].copy()
         self.last_corrections = self.client.predictor.corrections
         mouse.locked = self.autopilot is None
+        self._set_picking(False)
         self.apply_settings()
         self.audio.play("respawn", 0.6)
 
@@ -585,7 +624,7 @@ class NexusGame:
             distance = float(np.sqrt(np.sum((position - rig.cam_pos) ** 2)))
             scene.post.add_flash(min(0.5, 6.0 / max(distance * distance, 1.0)))
             _, right, _ = self._camera_basis()
-            audio.play_at("explosion", position, rig.cam_pos, right, 1.0, 22.0)
+            audio.play_at("explosion", position, rig.cam_pos, right)
             self.grenades.remove_gid(event[3])
         elif kind == S.EV_GRENADE:
             _, gid, owner, position, velocity, fuse, spawn_tick = event
@@ -678,8 +717,9 @@ class NexusGame:
                                                                      SS.format_number(snap["xp_need"]), snap["prestige"]))
             if self.settings["show_fps"]:
                 pred = client.predictor
-                hud.set_net("FPS %d  |  PING %d ms  |  CORRECTIONS %d  |  PREDICTION ERROR %.3f" % (
-                    round(self.fps), round(client.ping_ms), pred.corrections, pred.last_error))
+                hud.set_net("FPS %d  |  %s %d%%  |  PING %d ms  |  CORRECTIONS %d  |  PREDICTION ERROR %.3f" % (
+                    round(self.fps), C.QUALITY_NAMES[self.scene.quality], round(self.scene.post.render_scale * 100.0),
+                    round(client.ping_ms), pred.corrections, pred.last_error))
             else:
                 hud.set_net("")
         hud.update(dt)

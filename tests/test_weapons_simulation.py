@@ -22,7 +22,8 @@ def test_weapon_table_is_consistent():
 def test_upgrades_change_derived_stats():
     base = W.derive_stats(0, np.zeros(8, int))
     maxed = W.derive_stats(0, W.UPGRADE_MAX)
-    assert np.isclose(maxed["damage"], base["damage"] * 2.0)                            # 20 levels x 5 %
+    assert np.isclose(maxed["damage"], base["damage"] * 1.15)                           # 10 levels x 1.5 %
+    assert np.isclose(maxed["interval"], base["interval"] * 0.90)                       # 10 levels x 1 %
     assert maxed["interval"] < base["interval"] and maxed["mag"] > base["mag"]
     assert maxed["reload_ticks"] < base["reload_ticks"] and maxed["recoil_pitch"] < base["recoil_pitch"]
     assert maxed["spread_hip"] < base["spread_hip"] and maxed["range_end"] > base["range_end"]
@@ -65,13 +66,85 @@ def test_automatic_fire_cadence_reload_and_semi_auto():
             shot_ticks[row].append(tick)
         shots += fired
     assert np.all(np.diff(shot_ticks[0][:30]) == 6)                                     # 600 rpm at 60 Hz
-    assert shots[0] == 30 + (360 - (175 + 126)) // 6 + 1                                # full mag, reload, resume
+    reload_ticks = int(W.WEAPONS["reload"][0])
+    assert shots[0] == 30 + (360 - (175 + reload_ticks)) // 6 + 1                       # full mag, reload, resume
     assert shots[1] == 1                                                                # semi-auto: held trigger = 1 round
     gaps = np.diff(shot_ticks[2][:20])
-    assert set(gaps.tolist()) <= {4, 5} and abs(gaps.mean() - 6.0 * 0.7) < 0.15         # fractional cadence carried
+    assert set(gaps.tolist()) <= {5, 6} and abs(gaps.mean() - 6.0 * 0.9) < 0.1          # fractional cadence carried
     ws.reset_rows([1])
     taps = sum(bool(W.step_weapons(ws, [1], np.uint16(C.BTN_SHOOT if t % 2 else 0), 1000 + t, True)[0]) for t in range(40))
-    assert taps == 40 // 2 // 4 + 1 or 4 <= taps <= 6                                   # tapping is limited by the cadence
+    assert 6 <= taps <= 8                                                               # tapping is limited by the cadence
+
+
+def test_balance_model_invariants_hold():
+    assert W.validate_balance() == []
+    assert C.BASE_HEALTH == 100.0
+    for row in W.balance_report():
+        assert C.TTK_MIN_MS <= row["ttk_ms"] <= C.TTK_MAX_MS, row
+        assert C.TTK_MIN_MS <= row["ttk_max_ms"] <= C.TTK_MAX_MS, row
+    order = sorted(W.balance_report(), key=lambda r: r["burst_damage"])
+    assert [r["rpm"] for r in order] == sorted((r["rpm"] for r in order), reverse=True)        # more damage, slower fire
+    assert [r["recoil_deg"] for r in order] == sorted(r["recoil_deg"] for r in order)           # ... more recoil
+    assert [r["reload_s"] for r in order] == sorted(r["reload_s"] for r in order)               # ... slower reload
+    for weapon in range(W.WEAPON_COUNT):                                                        # every upgrade mix
+        for damage_level in range(int(W.UPGRADE_MAX[W.UPG_DAMAGE]) + 1):
+            for rate_level in range(int(W.UPGRADE_MAX[W.UPG_FIRE_RATE]) + 1):
+                levels = np.zeros(8, int)
+                levels[W.UPG_DAMAGE], levels[W.UPG_FIRE_RATE] = damage_level, rate_level
+                assert C.TTK_MIN_MS - 1e-6 <= W.time_to_kill_ms(weapon, levels) <= C.TTK_MAX_MS + 1e-6
+
+
+def test_simulated_time_to_kill_matches_the_model():
+    """Fire each weapon at a 100 health target in the real simulation and time the kill."""
+    for weapon in range(W.WEAPON_COUNT):
+        for levels in (np.zeros((2, 8), int), np.tile(W.UPGRADE_MAX, (2, 1))):
+            game = S.GameWorld("crucible", mode=C.MODE_TDM, seed=3)
+            a = game.add_player("alpha", weapon_ids=(weapon, 4), levels=levels)
+            b = game.add_player("bravo")
+            s = game.store
+            s.move.pos[a] = (-8.0, 0.0, 14.0)
+            s.move.pos[b] = (-5.0, 0.0, 14.0)                                           # 3 m: inside every range
+            s.yaw[b] = np.pi / 2                                                        # facing the shooter
+            s.protect_until[:] = 0
+            s.weapons.spread_hip[a] = 0.0
+            s.weapons.spread_ads[a] = 0.0
+            s.weapons.bloom_shot[a] = 0.0
+            s.refresh_hitboxes()
+            assert s.health[b] == 100.0 and s.max_health[b] == 100.0
+            aim(game, a, b, 1)
+            first = last = None
+            for tick in range(1, 80):
+                ready = tick >= s.weapons.next_fire[a] - 1e-9                           # perfect trigger finger
+                buttons = C.BTN_SHOOT if (s.weapons.auto[a, 0] or ready) else 0
+                fired = game.step_commands(np.array([a]), np.uint16(buttons), s.yaw[a], s.pitch[a], tick)
+                if fired[0]:
+                    first = tick if first is None else first
+                    game.resolve_shots(np.array([a]))
+                if not s.alive[b]:
+                    last = tick
+                    break
+            assert last is not None, W.WEAPON_KEYS[weapon]
+            measured = (last - first) * C.TICK_MS
+            model = W.time_to_kill_ms(weapon, levels[0])
+            assert abs(measured - model) <= C.TICK_MS + 1e-6, (W.WEAPON_KEYS[weapon], measured, model)
+            assert C.TTK_MIN_MS - 1e-6 <= measured <= C.TTK_MAX_MS + C.TICK_MS
+
+
+def test_blast_plating_reduces_explosive_damage_only():
+    game = S.GameWorld("crucible", mode=C.MODE_TDM, seed=5)
+    a = game.add_player("alpha")
+    plain = game.add_player("plain", team=1)
+    plated = game.add_player("plated", team=1, operator=[5, 0, 0, 0])
+    s = game.store
+    assert s.max_health[plated] == 100.0 and np.isclose(s.blast_resist[plated], 0.70) and s.blast_resist[plain] == 1.0
+    s.move.pos[plain] = (2.0, 0.0, 14.0)
+    s.move.pos[plated] = (-2.0, 0.0, 14.0)
+    s.protect_until[:] = 0
+    s.refresh_hitboxes()
+    game.drain_events()
+    game.explode(np.array([0.0, 0.9, 14.0]), a, 1)
+    dealt = {e[2]: e[3] for e in game.drain_events() if e[0] == S.EV_HIT}
+    assert np.isclose(dealt[plated], dealt[plain] * 0.70) and dealt[plain] < C.GRENADE_DAMAGE
 
 
 def test_swap_cancels_reload_and_dead_players_cannot_fire():
