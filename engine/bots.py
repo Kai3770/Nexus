@@ -20,6 +20,7 @@ from __future__ import annotations
 import numpy as np
 
 from . import config as C
+from . import equipment as EQ
 from . import mathx as M
 from . import simulation as S
 from .controller_3d import eye_height
@@ -130,7 +131,8 @@ class BotController:
         seen = np.zeros((rows.size, n), dtype=bool)
         bi, ti = np.nonzero(consider)
         if bi.size:
-            seen[bi, ti] = self.game.world.line_of_sight(eyes[bi], centers[ti])
+            clear = self.game.world.line_of_sight(eyes[bi], centers[ti])
+            seen[bi, ti] = clear & ~self.game.smoke_blocks(eyes[bi], centers[ti])     # nobody sees through smoke
         self.visible[rows] = seen
 
     # ---- decision step ----------------------------------------------------------------------
@@ -244,7 +246,8 @@ class BotController:
         look_yaw, look_pitch = M.yaw_pitch_from_direction(self.last_seen[rows] + np.array([0.0, 1.2, 0.0]) - eyes)
         desired_yaw = np.where(has_target, want_yaw, np.where(hunting & (move_len < 3.0), look_yaw, travel_yaw))
         desired_pitch = np.where(has_target, want_pitch, 0.0)
-        self.noise[rows] = self.noise[rows] * 0.90 + rng.normal(0.0, aim_noise * 0.44, (k, 2))
+        shaken = np.where(store.cmd_tick[rows] < store.stun_until[rows], 3.0, 1.0)[:, None]   # stunned: shaky aim
+        self.noise[rows] = self.noise[rows] * 0.90 + rng.normal(0.0, aim_noise * 0.44, (k, 2)) * shaken
         range_scale = np.clip(target_dist / 14.0, 0.45, 1.6)
         goal_yaw = desired_yaw + np.where(has_target, self.noise[rows, 0] * range_scale, 0.0)
         goal_pitch = desired_pitch + np.where(has_target, self.noise[rows, 1] * range_scale * 0.6, 0.0)
@@ -302,8 +305,18 @@ class BotController:
         # ---- utility ---------------------------------------------------------------------------------------------------
         low_ammo = ammo * 2 < ws.mag[rows, slot]
         reload = ~has_target & low_ammo & ~reloading & ((tick + self.phase[rows]) % 20 == 0)
-        throw = (engaged & (target_dist > 8.0) & (target_dist < 26.0) & (store.cmd_tick[rows] >= store.ability_ready[rows])
+        lethal_kind = EQ.KIND[store.equip[rows, 0]]
+        tactical_kind = EQ.KIND[store.equip[rows, 1]]
+        hatchet = lethal_kind == EQ.KIND_AXE
+        in_range = np.where(hatchet, (target_dist > 3.0) & (target_dist < 16.0), (target_dist > 8.0) & (target_dist < 26.0))
+        throw = engaged & in_range & (store.cmd_tick[rows] >= store.ability_ready[rows]) & (rng.random(k) < grenade_chance)
+        tactical_ready = store.cmd_tick[rows] >= store.tactical_ready[rows]
+        hurt = store.health[rows] / np.maximum(store.max_health[rows], 1.0)
+        stim = (tactical_kind == EQ.KIND_STIM) & (hurt < 0.55) & (store.heal_left[rows] <= 0.0)
+        shock = ((tactical_kind == EQ.KIND_STUN) & engaged & (target_dist > 5.0) & (target_dist < 18.0)
                  & (rng.random(k) < grenade_chance))
+        smoke = (tactical_kind == EQ.KIND_SMOKE) & has_target & (hurt < 0.45)
+        tactical = tactical_ready & (stim | shock | smoke)
 
         buttons |= move_buttons
         buttons |= np.where(sprint, C.BTN_SPRINT, 0).astype(np.uint16)
@@ -313,6 +326,7 @@ class BotController:
         buttons |= np.where(ads, C.BTN_ADS, 0).astype(np.uint16)
         buttons |= np.where(reload, C.BTN_RELOAD, 0).astype(np.uint16)
         buttons |= np.where(throw, C.BTN_ABILITY, 0).astype(np.uint16)
+        buttons |= np.where(tactical, C.BTN_TACTICAL, 0).astype(np.uint16)
         buttons = np.where(alive, buttons, 0).astype(np.uint16)
         return buttons, aim_yaw, aim_pitch
 
@@ -330,7 +344,7 @@ def run_bot_match(map_key="crucible", bots: int = 8, ticks: int = 3600, difficul
         game.add_player("BOT-%02d" % index, is_bot=True)
     controller = BotController(game, difficulty, seed=seed + 1)
     game.drain_events()
-    shots = hits = kills = explosions = 0
+    shots = hits = kills = explosions = void_deaths = 0
     worst = 0.0
     started = time.perf_counter()
     for _ in range(ticks):
@@ -348,6 +362,7 @@ def run_bot_match(map_key="crucible", bots: int = 8, ticks: int = 3600, difficul
             hits += kind == S.EV_HIT
             kills += kind == S.EV_KILL
             explosions += kind == S.EV_EXPLOSION
+            void_deaths += kind == S.EV_KILL and bool(event[4] & S.KILL_SUICIDE) and event[3] == 0
         worst = max(worst, time.perf_counter() - t0)
     elapsed = time.perf_counter() - started
     store = game.store
@@ -355,6 +370,7 @@ def run_bot_match(map_key="crucible", bots: int = 8, ticks: int = 3600, difficul
         "ticks": ticks, "shots": int(shots), "hits": int(hits), "kills": int(kills), "explosions": int(explosions),
         "team_scores": game.team_scores.tolist(), "matches": game.matches_played,
         "mean_tick_ms": elapsed / ticks * 1000.0, "worst_tick_ms": worst * 1000.0,
-        "min_y": float(store.move.pos[store.active, 1].min()), "finite": bool(np.isfinite(store.move.pos).all()),
+        "min_y": float(store.move.pos[store.active & store.alive, 1].min()) if np.any(store.active & store.alive) else 0.0,
+        "void_deaths": int(void_deaths), "finite": bool(np.isfinite(store.move.pos).all()),
         "kills_per_bot": store.kills[store.active].tolist(), "deaths_per_bot": store.deaths[store.active].tolist(),
     }

@@ -9,13 +9,14 @@ gespeicherte Fortschritt; `README.md` beschreibt das Spiel selbst.
 | --- | --- |
 | `engine/config.py` | Neu: Waffen-/Upgrade-Tabellen, TTK-Band, Audio-Decken, Grafik-Presets, Frame-Pacing |
 | Waffen | 29 Waffen in 7 Klassen (17 im letzten Schritt neu), alle im Balance-Modell; Sound, Tracer und Ego-Modell entstehen aus den Werten bzw. aus `WEAPON_LOOKS`; Armory nach Klassen geblättert; Bots nutzen das ganze Arsenal |
+| Ausrüstung | Letal [G]: PULSE GRENADE, RAZOR HATCHET (Tomahawk), CLING CHARGE (Haftladung), THERMITE FLASK (Brand); Taktisch [F]: NANO STIM, SHOCK GRENADE (Betäubung), SMOKE CANISTER; Wahl im Menü EQUIPMENT, im Match über Pause (gilt ab nächstem Respawn); `equipment.validate_equipment()` leer |
 | Waffenbalance | TTK 333 bis 483 ms (Körpertreffer, 100 HP), maximal aufgerüstet 300 bis 450 ms; `weapons.validate_balance()` leer |
 | Audio | Master-Clamp 0..1, Kategorie-Decken (Waffe 0.25, Treffer 0.20, Explosion 0.30), Abfall 1/d² |
 | Karten | `content/maps_registry.py` (5 Arenen als Tupel-Daten), `engine/maps.py` als Injektor, JSON-Drop-in, Laufzeit-Registrierung, CRC im Handshake |
 | Renderer | `engine/renderer.py` neu: Material-Texturarrays, Normal-Mapping, Sonnenschatten (statisch + dynamisch), gebackene Lampen + AO, Himmelspanorama, 3D-Skyline, Bloom, gebündelte Pools und HUD |
 | Frame-Pacing | Vsync standardmäßig aus, Limiter 144 fps, dynamische Auflösung (Ziel 60 fps), automatischer Preset-Rückfall, Cursor-Picking nur in Menüs |
 | Stabilität | Rückstoß-/Landefeder im Kamera-Rig implizit integriert (vorher bei <= 10 fps divergent, Bild wurde einfarbig); Client-Keep-alive während des Erst-Backens |
-| Tests | 99 bestanden (`python -m pytest tests -q` und `python tests/run_all.py`), davon 2 gerenderte Läufe unter xvfb |
+| Tests | 115 bestanden (`python -m pytest tests -q` und `python tests/run_all.py`), davon 2 gerenderte Läufe unter xvfb |
 
 ## Messwerte (Container ohne GPU, Mesa llvmpipe, 1280x720, 8 Spieler, Listen-Server im selben Prozess)
 

@@ -268,7 +268,8 @@ def test_bot_match_datacore_team_deathmatch():
 
 def test_bot_match_skybridge_nobody_gets_stuck_in_the_void():
     result = soak("skybridge", C.MODE_TDM)
-    assert result["min_y"] > maps.load_map("skybridge").data.kill_y
+    assert result["min_y"] > maps.load_map("skybridge").data.kill_y                 # nobody alive below the floor
+    assert result["void_deaths"] == 0                                               # falls only by being knocked off
 
 
 def test_bot_match_terminal_and_atrium():
@@ -279,4 +280,4 @@ def test_bot_match_terminal_and_atrium():
 def test_bot_difficulty_changes_lethality():
     easy = bots.run_bot_match("crucible", bots=6, ticks=1800, difficulty=0, mode=C.MODE_FFA, seed=5)
     hard = bots.run_bot_match("crucible", bots=6, ticks=1800, difficulty=2, mode=C.MODE_FFA, seed=5)
-    assert hard["hits"] / max(hard["shots"], 1) > easy["hits"] / max(easy["shots"], 1)
+    assert hard["kills"] >= easy["kills"] * 1.4 and hard["hits"] > easy["hits"]      # stims make accuracy alone noisy

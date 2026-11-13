@@ -29,6 +29,7 @@ from panda3d.core import ClockObject
 from ursina import application, camera, held_keys, mouse
 
 from . import config as C
+from . import equipment as EQ
 from . import mathx as M
 from . import maps
 from . import network_lan as N
@@ -51,12 +52,14 @@ _TRACER_BY_CLASS = {0: (1.0, 0.84, 0.48, 1.0), 1: (1.0, 0.9, 0.58, 0.9), 2: (1.0
 TRACER_COLORS = tuple(_TRACER_TUNED[i] if i < len(_TRACER_TUNED) else _TRACER_BY_CLASS[int(W.WEAPONS["klass"][i])]
                       for i in range(W.WEAPON_COUNT))
 KEY_LATCH = {"space": C.BTN_JUMP, "left mouse down": C.BTN_SHOOT, "c": C.BTN_SLIDE, "left control": C.BTN_SLIDE,
-             "r": C.BTN_RELOAD, "q": C.BTN_SWAP, "g": C.BTN_ABILITY, "scroll up": C.BTN_SWAP, "scroll down": C.BTN_SWAP}
+             "r": C.BTN_RELOAD, "q": C.BTN_SWAP, "g": C.BTN_ABILITY, "f": C.BTN_TACTICAL, "scroll up": C.BTN_SWAP,
+             "scroll down": C.BTN_SWAP}
 HELD_BUTTONS = (("w", C.BTN_FORWARD), ("s", C.BTN_BACK), ("a", C.BTN_LEFT), ("d", C.BTN_RIGHT), ("space", C.BTN_JUMP),
                 ("left shift", C.BTN_SPRINT), ("left control", C.BTN_SLIDE), ("c", C.BTN_SLIDE),
                 ("left mouse", C.BTN_SHOOT), ("right mouse", C.BTN_ADS), ("r", C.BTN_RELOAD), ("q", C.BTN_SWAP),
-                ("g", C.BTN_ABILITY))
-CONTROL_HINT = "WASD move   SHIFT sprint   C slide   SPACE jump   LMB fire   RMB aim   G grenade   R reload   Q swap   TAB scores"
+                ("g", C.BTN_ABILITY), ("f", C.BTN_TACTICAL))
+CONTROL_HINT = ("WASD move   SHIFT sprint   C slide   SPACE jump   LMB fire   RMB aim   G lethal   F tactical   R reload   "
+                "Q swap   TAB scores")
 
 
 class AutoPilot:
@@ -114,6 +117,8 @@ class AutoPilot:
                 buttons |= C.BTN_JUMP
             if self.timer % 330 == 200:
                 buttons |= C.BTN_SLIDE
+            if self.timer % 420 == 300:
+                buttons |= C.BTN_TACTICAL
             if int(store.weapons.ammo[0, int(store.weapons.slot[0])]) * 2 < int(store.weapons.current("mag", 0)[0]):
                 buttons |= C.BTN_RELOAD if self.timer % 30 == 0 else 0
         return buttons, yaw, pitch
@@ -139,6 +144,8 @@ class NexusGame:
         self.paused = False
         self.autopilot = AutoPilot() if autoplay else None
         self.grenades = S.GrenadeStore()
+        self.zone_fx: list = []                  # burning fire pools and smoke clouds: [kind, position, radius, end]
+        self.stun_end = 0.0                      # local clock time when the stun wears off
         self.empty_view = N.EntityView(C.MAX_PLAYERS)
         self.rng = np.random.default_rng(int(time.time()) & 0xFFFF)
         self.yaw = 0.0
@@ -243,7 +250,8 @@ class NexusGame:
 
     def _connect(self, address: str, port: int) -> None:
         weapon_ids, levels, operator, prestige = self.pm.loadout_arrays()
-        self.client = N.GameClient(self.pm.profile.name, weapon_ids, levels, operator, prestige)
+        self.client = N.GameClient(self.pm.profile.name, weapon_ids, levels, operator, prestige,
+                                   equipment=self.pm.equipment_ids())
         self.client.connect(address, port)
         self.state = STATE_CONNECTING
         self.menus.show("connecting")
@@ -253,6 +261,14 @@ class NexusGame:
         self.menus.hide()
         mouse.locked = True
         self._set_picking(False)
+
+    def equipment_changed(self) -> None:
+        """The player picked a different lethal / tactical: tell the server (it applies at the next respawn)."""
+        if self.client is not None:
+            self.client.equipment = self.pm.equipment_ids()
+
+    def in_match(self) -> bool:
+        return self.state == STATE_PLAYING
 
     def leave_match(self) -> None:
         self._shutdown_session()
@@ -274,6 +290,8 @@ class NexusGame:
             self.server.stop()
             self.server = None
         self.grenades.clear()
+        self.zone_fx.clear()
+        self.stun_end = 0.0
 
     def quit(self) -> None:
         self._shutdown_session()
@@ -391,6 +409,8 @@ class NexusGame:
         self.streak = 0
         self.accumulator = 0.0
         self.grenades.clear()
+        self.zone_fx.clear()
+        self.stun_end = 0.0
         store = self.client.predictor.store
         self.prev_pos = store.move.pos[0].copy()
         self.last_corrections = self.client.predictor.corrections
@@ -406,6 +426,8 @@ class NexusGame:
         self.scene.load_map(data)
         self.backdrop_map = data.key
         self.grenades.clear()
+        self.zone_fx.clear()
+        self.stun_end = 0.0
         self.result = ""
 
     # ================================================================== #
@@ -427,6 +449,8 @@ class NexusGame:
         if not self.paused and self.autopilot is None:
             sensitivity = math.radians(LOOK_DEGREES_PER_UNIT) * self.settings["sensitivity"]
             sensitivity /= 1.0 + (zoom - 1.0) * rig.ads_blend
+            if self.clock < self.stun_end:
+                sensitivity *= C.STUN_LOOK_SCALE                     # stunned: the aim drags
             look = (float(mouse.velocity[0]), float(mouse.velocity[1]))
             self.yaw += look[0] * sensitivity
             self.pitch += look[1] * sensitivity * (-1.0 if self.settings["invert_y"] else 1.0)
@@ -449,6 +473,12 @@ class NexusGame:
         alpha = self.accumulator / C.TICK_DT
         feet = self.prev_pos + (store.move.pos[0] - self.prev_pos) * alpha + pred.visual_error
         view = client.sample_entities()
+        self._follow_attached(view)
+        self._update_zone_fx(dt)
+        stunned = max(self.stun_end - self.clock, 0.0)
+        if stunned > 0.0:
+            rig.trauma = max(rig.trauma, min(0.30 + stunned * 0.15, 0.6))
+        scene.post.set_stun(min(stunned / 0.6, 1.0))
 
         reloading = int(store.weapons.reload_end[0]) > 0
         rig.update(dt, feet, store.move.vel[0], int(store.move.mflags[0]) if alive else 0, float(store.move.crouch_t[0]),
@@ -459,9 +489,7 @@ class NexusGame:
         scene.viewmodel.set_weapon(int(store.weapons.weapon[0, slot]))
         scene.viewmodel.set_visible(alive)
         scene.viewmodel.update(dt, rig, scene.lights.flash_level)
-        active = self.grenades.active
-        scene.render(dt, self.clock, rig.cam_pos, rig.cam_yaw, rig.cam_pitch, view, client.pid,
-                     self.grenades.pos[active] if active.any() else None)
+        scene.render(dt, self.clock, rig.cam_pos, rig.cam_yaw, rig.cam_pitch, view, client.pid, self.grenades)
         self._update_hud(dt, alive)
 
     # ---- one 60 Hz simulation tick -----------------------------------------------------------------
@@ -476,7 +504,7 @@ class NexusGame:
         was_reloading = int(ws.reload_end[0]) > 0
         was_slot = int(ws.slot[0])
         self.prev_pos = store.move.pos[0].copy()
-        fired, ability = client.send_command(buttons, self.yaw, self.pitch)
+        fired, ability, tactical = client.send_command(buttons, self.yaw, self.pitch)
         if store.alive[0]:
             flags = int(store.move.mflags[0])
             if flags & C.MF_JUMPED:
@@ -501,13 +529,51 @@ class NexusGame:
                 self.empty_click = self.frame
                 audio.play("empty", 0.5)
             if ability:
-                audio.play("throw", 0.7)
+                lethal = int(store.equip[0, 0])
+                audio.play("hatchet" if EQ.KIND[lethal] == EQ.KIND_AXE else "throw", 0.7)
+            if tactical:
+                if EQ.KIND[int(store.equip[0, 1])] == EQ.KIND_STIM:
+                    audio.play("stim", 0.8)
+                    self.scene.post.add_heal(0.9)
+                    self.hud.push_reward("STIM  +%d" % int(EQ.DAMAGE[int(store.equip[0, 1])]), (0.45, 1.0, 0.6))
+                else:
+                    audio.play("throw", 0.7)
             if int(ws.reload_end[0]) > 0 and not was_reloading:
                 audio.play("reload", 0.7)
             if int(ws.slot[0]) != was_slot:
                 audio.play("swap", 0.5)
         for slot in S.step_grenades(self.grenades, client.loaded.world).tolist():
             self.grenades.active[slot] = False
+
+    def _follow_attached(self, view) -> None:
+        """Charges stuck to players ride along with them."""
+        gs = self.grenades
+        for slot in np.flatnonzero(gs.active & gs.stuck & (gs.target >= 0)).tolist():
+            wearer = int(gs.target[slot])
+            if view.alive[wearer]:
+                gs.pos[slot] = view.pos[wearer] + gs.offset[slot]
+
+    def _update_zone_fx(self, dt: float) -> None:
+        """Fire pools and smoke clouds keep emitting until they burn out."""
+        if not self.zone_fx:
+            return
+        scene = self.scene
+        alive = []
+        for zone in self.zone_fx:
+            kind, position, radius, end, light = zone
+            if self.clock >= end:
+                continue
+            if kind == EQ.KIND_FIRE:
+                scene.fx_fire(position, radius, dt)
+                zone[4] = light - dt
+                if zone[4] <= 0.0:
+                    scene.lights.add(position + np.array([0.0, 0.7, 0.0]), (1.0, 0.55, 0.22),
+                                     11.0 + 4.0 * math.sin(self.clock * 23.0), 0.25, True)
+                    zone[4] = 0.18
+            else:
+                scene.fx_smoke(position, radius, dt)
+            alive.append(zone)
+        self.zone_fx = alive
 
     def _camera_basis(self):
         return (M.forward_vector(self.yaw, self.pitch), M.right_vector(self.yaw), M.up_vector(self.yaw, self.pitch))
@@ -579,7 +645,12 @@ class NexusGame:
             audio.play("hurt", 0.7, vary=0.08)
         elif kind == S.EV_KILL:
             _, killer, victim, weapon, flags = event
-            weapon_name = "PULSE GRENADE" if weapon == S.WEAPON_GRENADE else W.WEAPON_NAMES[weapon % W.WEAPON_COUNT]
+            if C.EQUIP_KILL_BASE <= weapon < C.EQUIP_KILL_BASE + EQ.EQUIP_COUNT:
+                weapon_name = EQ.EQUIP_NAMES[weapon - C.EQUIP_KILL_BASE]
+            elif weapon == S.WEAPON_GRENADE:
+                weapon_name = "KNOCKED OFF"
+            else:
+                weapon_name = W.WEAPON_NAMES[weapon % W.WEAPON_COUNT]
             if flags & S.KILL_SUICIDE:
                 line = "%s  was eliminated" % self._name(victim)
             else:
@@ -623,17 +694,55 @@ class NexusGame:
             _, right, _ = self._camera_basis()
             audio.shot_at(weapon, origin, rig.cam_pos, right)
         elif kind == S.EV_EXPLOSION:
-            position = np.asarray(event[1])
-            scene.fx_explosion(position)
-            rig.add_explosion_shake(rig.cam_pos, position[None, :])
+            _, position, _owner, gid, equip = event
+            position = np.asarray(position, dtype=np.float64)
+            effect = int(EQ.KIND[equip % EQ.EQUIP_COUNT])
             distance = float(np.sqrt(np.sum((position - rig.cam_pos) ** 2)))
-            scene.post.add_flash(min(0.5, 6.0 / max(distance * distance, 1.0)))
             _, right, _ = self._camera_basis()
-            audio.play_at("explosion", position, rig.cam_pos, right)
-            self.grenades.remove_gid(event[3])
+            if effect in (EQ.KIND_FRAG, EQ.KIND_STICKY):
+                scene.fx_explosion(position)
+                rig.add_explosion_shake(rig.cam_pos, position[None, :])
+                scene.post.add_flash(min(0.5, 6.0 / max(distance * distance, 1.0)))
+                audio.play_at("explosion", position, rig.cam_pos, right)
+            elif effect == EQ.KIND_STUN:
+                scene.fx_stun(position)
+                scene.post.add_flash(min(0.7, 12.0 / max(distance * distance, 1.0)))
+                audio.play_at("shock", position, rig.cam_pos, right)
+            else:
+                radius = float(EQ.RADIUS[equip % EQ.EQUIP_COUNT])
+                end = self.clock + float(EQ.DURATION[equip % EQ.EQUIP_COUNT])
+                self.zone_fx.append([effect, position, radius, end, 0.0])
+                if effect == EQ.KIND_FIRE:
+                    scene.fx_fire(position, radius, 0.0, burst=True)
+                    audio.play_at("fire", position, rig.cam_pos, right)
+                else:
+                    scene.fx_smoke(position, radius, 0.0, burst=True)
+                    audio.play_at("smoke", position, rig.cam_pos, right)
+            self.grenades.remove_gid(gid)
+        elif kind == S.EV_STICK:
+            _, gid, target, position = event
+            slot = self.grenades.find(gid)
+            _, right, _ = self._camera_basis()
+            if slot >= 0:
+                axe = EQ.KIND[int(self.grenades.equip[slot])] == EQ.KIND_AXE
+                if axe and target != S.NO_PLAYER:
+                    self.grenades.active[slot] = False                   # buried in somebody
+                    scene.fx_hit(position)
+                else:
+                    offset = None
+                    if target != S.NO_PLAYER and 0 <= target < len(client.view.pos):
+                        offset = np.asarray(position) - client.view.pos[target]
+                    self.grenades.stick(slot, position, None, target if offset is not None else -1, offset)
+                audio.play_at("hatchet_hit" if axe else "stick", np.asarray(position), rig.cam_pos, right)
+        elif kind == S.EV_STATUS:
+            _, status, ticks = event
+            if status == C.STATUS_STUN:
+                self.stun_end = max(self.stun_end, self.clock + ticks * C.TICK_DT)
+                scene.post.add_flash(0.45)
+                audio.play("stun_ring", 0.7)
         elif kind == S.EV_GRENADE:
-            _, gid, owner, position, velocity, fuse, spawn_tick = event
-            slot = self.grenades.spawn(position, velocity, fuse, owner, gid)
+            _, gid, owner, position, velocity, fuse, spawn_tick, equip = event
+            slot = self.grenades.spawn(position, velocity, fuse, owner, gid, equip)
             behind = int(np.clip(client.render_ms / C.TICK_MS - spawn_tick, 0, 30))
             for _ in range(behind):
                 expired = S.step_grenades(self.grenades, client.loaded.world)
@@ -682,8 +791,10 @@ class NexusGame:
         hud.set_crosshair(spread, R.vertical_fov(camera.fov), 0.0 if not alive else 1.0 - rig.ads_blend * (1.0 if scoped else 0.6), dt)
         hud.set_health(float(store.health[0]) if alive else 0.0, float(store.max_health[0]))
         hud.set_weapon(W.WEAPON_NAMES[weapon], int(ws.ammo[0, slot]), int(ws.mag[0, slot]), int(ws.reload_end[0]) > 0)
-        remaining = float(store.ability_ready[0] - store.cmd_tick[0]) / max(float(store.ability_cooldown[0]), 1.0)
-        hud.set_ability(1.0 - min(max(remaining, 0.0), 1.0))
+        lethal_left = float(store.ability_ready[0] - store.cmd_tick[0]) / max(float(store.ability_cooldown[0]), 1.0)
+        tactical_left = float(store.tactical_ready[0] - store.cmd_tick[0]) / max(float(store.tactical_cooldown[0]), 1.0)
+        hud.set_equipment(EQ.EQUIP_NAMES[int(store.equip[0, 0])], 1.0 - min(max(lethal_left, 0.0), 1.0),
+                          EQ.EQUIP_NAMES[int(store.equip[0, 1])], 1.0 - min(max(tactical_left, 0.0), 1.0))
         own = client.roster.get(client.pid)
         hud.set_match(client.mode, client.scores, client.time_left, client.team, own.kills if own is not None else 0,
                       client.score_limit)

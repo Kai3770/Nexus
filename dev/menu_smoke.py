@@ -28,7 +28,7 @@ from engine.game import NexusGame                                            # n
 game = NexusGame(profiles)
 sponsor = SS.CorporateSponsorThread(profiles, interval=0.05)
 sponsor.start()
-order = ["main", "setup", "lobby", "armory", "sponsors", "settings", "pause"]
+order = ["main", "setup", "lobby", "armory", "equipment", "sponsors", "settings", "pause"]
 state = {"frame": 0}
 
 
@@ -44,6 +44,8 @@ def frame():
         game.menus.show(order[index])
         if order[index] == "armory":
             game.menus.screens["armory"].select("breacher")
+        if order[index] == "equipment":
+            game.menus.screens["equipment"].select("cling")
     if phase == 10:
         application.base.screenshot(namePrefix=os.path.join(OUT, "menu_%s.png" % order[index]), defaultFilename=False)
 

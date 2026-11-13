@@ -16,6 +16,7 @@ from ursina import Button, Entity, Text, camera, color, window
 from ursina.prefabs.input_field import InputField
 
 from . import config as C
+from . import equipment as EQ
 from . import maps
 from . import secure_save as SS
 from . import weapons as W
@@ -106,10 +107,10 @@ class MainScreen(Screen):
         self.label("LAN ARENA SHOOTER  //  INCREMENTAL CORPORATE WARFARE", 0.0, 0.295, 0.85, (0, 0), COL_DIM)
         entries = (("PLAY SOLO", lambda: self.menu.open_setup(False)), ("HOST LAN GAME", lambda: self.menu.open_setup(True)),
                    ("JOIN LAN GAME", lambda: self.menu.show("lobby")), ("ARMORY", lambda: self.menu.show("armory")),
-                   ("SPONSORS", lambda: self.menu.show("sponsors")), ("SETTINGS", lambda: self.menu.show("settings")),
-                   ("QUIT", self.game.quit))
+                   ("EQUIPMENT", lambda: self.menu.show("equipment")), ("SPONSORS", lambda: self.menu.show("sponsors")),
+                   ("SETTINGS", lambda: self.menu.show("settings")), ("QUIT", self.game.quit))
         for index, (text, action) in enumerate(entries):
-            self.button(text, -0.42, 0.17 - index * 0.075, 0.36, 0.06, action, COL_DANGER if text == "QUIT" else COL_BUTTON, 1.0)
+            self.button(text, -0.42, 0.17 - index * 0.068, 0.36, 0.056, action, COL_DANGER if text == "QUIT" else COL_BUTTON, 1.0)
         self.panel(0.30, -0.065, 0.66, 0.50)
         self.name_text = self.label("", 0.0, 0.145, 1.5)
         self.level_text = self.label("", 0.0, 0.095, 0.95, rgb=COL_DIM)
@@ -556,15 +557,110 @@ class ConnectingScreen(Screen):
         self.set_text(self.detail, self.game.connect_detail())
 
 
+class EquipmentScreen(Screen):
+    """Lethal (G) and tactical (F) equipment: unlock and equip; during a match it applies at the next respawn."""
+    title = "EQUIPMENT"
+
+    def build(self) -> None:
+        hw = self.half_width
+        self.selected = EQ.EQUIP_KEYS[EQ.DEFAULT_EQUIPMENT[0]]
+        self.wallet = self.label("", hw - 0.04, 0.43, 1.2, (0.5, 0), COL_GOLD)
+        self.item_buttons = {}
+        left, y = -hw + 0.24, 0.34
+        for slot, members in ((C.EQUIP_LETHAL, EQ.LETHALS), (C.EQUIP_TACTICAL, EQ.TACTICALS)):
+            self.label("%s   [%s]" % (C.EQUIP_SLOT_NAMES[slot], "G" if slot == C.EQUIP_LETHAL else "F"), left, y, 0.85,
+                       (0, 0), COL_ACCENT)
+            y -= 0.06
+            for index in sorted(members, key=lambda e: (int(EQ.UNLOCK_LEVEL[e]), e)):
+                key = EQ.EQUIP_KEYS[index]
+                self.item_buttons[key] = self.button("", left, y, 0.42, 0.052, lambda k=key: self.select(k), text_size=0.75)
+                y -= 0.062
+            y -= 0.03
+        self.panel(0.20, 0.02, 1.00, 0.66)
+        x = -0.25
+        self.name = self.label("", x, 0.30, 1.5)
+        self.slot = self.label("", x, 0.255, 0.75, rgb=COL_DIM)
+        self.desc = self.label("", x, 0.215, 0.75, rgb=COL_DIM)
+        self.stats = self.label("", x, 0.17, 0.78)
+        self.action = self.button("", 0.50, 0.30, 0.26, 0.05, self.act, COL_GOOD, 0.75)
+        self.loadout = self.label("", x, 0.07, 0.85, rgb=COL_GOLD)
+        self.note = self.label("", x, 0.025, 0.7, rgb=COL_DIM)
+        self.label("G throws your lethal, F uses your tactical. Each slot has its own cooldown.", x, -0.02, 0.7,
+                   rgb=COL_DIM)
+        self.button("BACK", -hw + 0.12, -0.44, 0.16, 0.05, self.leave)
+
+    def leave(self) -> None:
+        self.menu.show("pause" if self.game.in_match() else "main")
+
+    def select(self, key: str) -> None:
+        self.selected = key
+        self.refresh()
+
+    def act(self) -> None:
+        key = self.selected
+        name = EQ.EQUIP_NAMES[EQ.EQUIP_INDEX[key]]
+        later = "  -  takes effect when you respawn" if self.game.in_match() else ""
+        if not self.pm.profile.gear[key]["unlocked"]:
+            ok = self.pm.unlock_gear(key) and self.pm.equip_gear(key)
+            self.finish(ok, "%s unlocked and equipped%s" % (name, later), "Not enough credits or level")
+        elif key not in self.pm.profile.equipment:
+            self.finish(self.pm.equip_gear(key), "%s equipped%s" % (name, later), "Cannot equip")
+
+    def finish(self, ok: bool, good: str, bad: str) -> None:
+        self.game.play_ui("ui_buy" if ok else "ui_error")
+        if ok:
+            self.pm.save()
+            self.game.equipment_changed()
+        self.menu.notify(good if ok else bad)
+        self.refresh()
+
+    def refresh(self) -> None:
+        profile = self.pm.profile
+        self.set_text(self.wallet, "%s    LEVEL %d" % (money(profile.credits), profile.level))
+        for key, button in self.item_buttons.items():
+            index = EQ.EQUIP_INDEX[key]
+            if key in profile.equipment:
+                tag = "EQUIPPED"
+            elif profile.gear[key]["unlocked"]:
+                tag = "OWNED"
+            else:
+                tag = "LOCKED  L%d" % int(EQ.UNLOCK_LEVEL[index])
+            self.set_text(button, "%s   [%s]" % (EQ.EQUIP_NAMES[index], tag))
+            self.tint(button, (0.10, 0.30, 0.40) if key == self.selected else COL_BUTTON)
+        key = self.selected
+        index = EQ.EQUIP_INDEX[key]
+        self.set_text(self.name, EQ.EQUIP_NAMES[index])
+        self.set_text(self.slot, "%s  -  %s" % (C.EQUIP_SLOT_NAMES[int(EQ.SLOT[index])],
+                                              C.EQUIPMENT_KINDS[int(EQ.KIND[index])].upper()))
+        self.set_text(self.desc, EQ.EQUIP_DESCRIPTIONS[index])
+        self.set_text(self.stats, EQ.describe(index))
+        if not profile.gear[key]["unlocked"]:
+            if profile.level >= int(EQ.UNLOCK_LEVEL[index]):
+                text = "UNLOCK  %s" % money(self.pm.gear_unlock_cost(key))
+            else:
+                text = "REQUIRES LEVEL %d" % int(EQ.UNLOCK_LEVEL[index])
+            colour = COL_GOOD if self.pm.can_unlock_gear(key) else COL_BAD
+        elif key in profile.equipment:
+            text, colour = "EQUIPPED", COL_BAD
+        else:
+            text, colour = "EQUIP", COL_GOOD
+        self.set_text(self.action, text)
+        self.tint(self.action, colour)
+        self.set_text(self.loadout, "YOUR LOADOUT:   %s   +   %s" % (
+            EQ.EQUIP_NAMES[EQ.EQUIP_INDEX[profile.equipment[0]]], EQ.EQUIP_NAMES[EQ.EQUIP_INDEX[profile.equipment[1]]]))
+        self.set_text(self.note, "In a match, changes take effect when you respawn." if self.game.in_match() else "")
+
+
 class PauseScreen(Screen):
     def build(self) -> None:
-        self.panel(0.0, 0.0, 0.62, 0.52, (0.02, 0.03, 0.05), 0.90)
-        self.label("PAUSED", 0.0, 0.19, 1.9, (0, 0), COL_ACCENT)
-        self.info = self.label("", 0.0, 0.125, 0.75, (0, 0), COL_DIM)
-        self.button("RESUME", 0.0, 0.04, 0.34, 0.065, self.game.resume, COL_GOOD, 1.0)
-        self.button("LEAVE MATCH", 0.0, -0.05, 0.34, 0.065, self.game.leave_match, COL_DANGER, 1.0)
-        self.label("The match keeps running while this menu is open", 0.0, -0.14, 0.65, (0, 0), COL_DIM)
-        self.wallet = self.label("", 0.0, -0.19, 0.85, (0, 0), COL_GOLD)
+        self.panel(0.0, -0.01, 0.62, 0.60, (0.02, 0.03, 0.05), 0.90)
+        self.label("PAUSED", 0.0, 0.21, 1.9, (0, 0), COL_ACCENT)
+        self.info = self.label("", 0.0, 0.145, 0.75, (0, 0), COL_DIM)
+        self.button("RESUME", 0.0, 0.065, 0.34, 0.062, self.game.resume, COL_GOOD, 1.0)
+        self.button("EQUIPMENT", 0.0, -0.01, 0.34, 0.062, lambda: self.menu.show("equipment"), COL_BUTTON, 1.0)
+        self.button("LEAVE MATCH", 0.0, -0.085, 0.34, 0.062, self.game.leave_match, COL_DANGER, 1.0)
+        self.label("The match keeps running while this menu is open", 0.0, -0.17, 0.65, (0, 0), COL_DIM)
+        self.wallet = self.label("", 0.0, -0.22, 0.85, (0, 0), COL_GOLD)
 
     def refresh(self) -> None:
         snap = self.pm.snapshot()
@@ -587,7 +683,8 @@ class MenuManager:
         self.toast = Text("", parent=camera.ui, position=(0, -0.385), scale=0.9, origin=(0, 0), color=_c(COL_ACCENT), z=-3)
         self.screens = {
             "main": MainScreen(self), "setup": SetupScreen(self), "lobby": LobbyScreen(self),
-            "armory": ArmoryScreen(self), "sponsors": SponsorScreen(self), "settings": SettingsScreen(self),
+            "armory": ArmoryScreen(self), "equipment": EquipmentScreen(self), "sponsors": SponsorScreen(self),
+            "settings": SettingsScreen(self),
             "connecting": ConnectingScreen(self), "pause": PauseScreen(self),
         }
         self.current = None

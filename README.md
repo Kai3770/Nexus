@@ -27,8 +27,8 @@ python main.py
 | `python main.py --solo datacore --autoplay --frames 600` | Self-playing demo that prints frame statistics |
 
 Controls: `WASD` move, `SHIFT` sprint, `C` / `CTRL` crouch and slide (press while sprinting),
-`SPACE` jump, left mouse fire, right mouse aim, `R` reload, `Q` swap weapon, `G` pulse grenade,
-`TAB` scoreboard, `ESC` pause.
+`SPACE` jump, left mouse fire, right mouse aim, `R` reload, `Q` swap weapon, `G` lethal equipment,
+`F` tactical equipment, `TAB` scoreboard, `ESC` pause.
 
 ## Playing on a LAN
 
@@ -88,6 +88,28 @@ definition, and a client without it is refused with a clear message instead of d
 The simulation always advances in fixed 60 Hz ticks (prediction and rollback need identical
 steps on client and server); rendering interpolates between ticks with the real frame delta, so
 motion is frame-rate independent at any refresh rate.
+
+## Equipment
+
+Every player carries one **lethal** (`G`) and one **tactical** (`F`), each with its own cooldown. Pick them on
+the **EQUIPMENT** screen (main menu, or the pause menu during a match: a change takes effect at your next
+respawn, like a class change). Bots carry random equipment and use it.
+
+| Item | Slot | What it does | Cooldown | Unlock |
+| --- | --- | --- | --- | --- |
+| PULSE GRENADE | Lethal | bouncing grenade, 1.6 s fuse, 120 damage at the centre, 6.5 m radius | 12 s | free |
+| RAZOR HATCHET | Lethal | thrown axe: lethal on a direct hit, no splash; sticks in walls | 9 s | L3, CR 2000 |
+| CLING CHARGE | Lethal | sticks to walls and players, detonates 1.2 s later: 140 (210 to the player wearing it), 4.5 m | 16 s | L5, CR 3000 |
+| THERMITE FLASK | Lethal | bursts on impact into a 3.2 m fire pool: 38 damage per second for 4 s | 15 s | L8, CR 4500 |
+| NANO STIM | Tactical | heals 50 over one second and restarts regeneration at once | 16 s | free |
+| SHOCK GRENADE | Tactical | stuns up to 2.5 s: movement x0.55, shaky aim, washed-out view (thrower: half) | 14 s | L2, CR 1800 |
+| SMOKE CANISTER | Tactical | 5 m smoke sphere for 8 s; nobody, bots included, sees through it | 18 s | L4, CR 2600 |
+
+`equipment.validate_equipment()` checks the balance rules, and the test-suite plays every item in the real
+simulation: no blast kills a full-health player more than 1 m away (none at all through full Blast Plating),
+a player wearing a cling charge always dies, fire needs more than two seconds to kill, the hatchet (direct
+hits only) recharges fastest, and a stim heals too slowly to win a gunfight with. The table is
+`EQUIPMENT_TABLE` in `engine/config.py`.
 
 ## Weapon balance
 
@@ -167,6 +189,7 @@ A host can run a level playing field with `dedicated_server.py --no-upgrades`.
 | `engine/network_lan.py` | **Module A.** Beacon discovery, `struct` protocol with delta compression, 30-tick rollback, prediction and reconciliation, interpolation |
 | `engine/secure_save.py` | **Module D.** Cost math, sponsors, Corporate Sponsor Thread, sealed and signed profile file |
 | `engine/simulation.py`, `engine/weapons.py`, `engine/bots.py` | Shared deterministic simulation, weapon state machine and balance model, bot AI |
+| `engine/equipment.py` | Lethal / tactical equipment table, per-kind helpers and balance rules |
 | `engine/game.py`, `engine/menus.py`, `engine/audio.py` | Client loop, front end, synthesised sound and the mixer |
 | `engine/mathx.py`, `engine/crypto.py` | Vector / quaternion math, stream cipher |
 
@@ -204,12 +227,13 @@ python -m pytest tests -q
 python tests/run_all.py
 ```
 
-The second command needs no pytest. 99 tests cover the math, the octree against a brute-force
+The second command needs no pytest. 115 tests cover the math, the octree against a brute-force
 reference, movement, weapons and the balance model, the simulation, all arenas and the injector
 (run-time registration, JSON drop-ins, malformed definitions, checksums), navigation on every
 storey, bot-only matches, the save system, wire codecs, rollback, live client / server sessions
 over loopback with latency, jitter and packet loss, a client that lacks the server's arena, the
-mixer, procedural materials, light baking, dynamic resolution, camera springs at 10 fps, a client
+mixer, every equipment item (hatchet hits, charges sticking to players, fire, stuns, smoke against bots,
+stims, respawn-time class changes), procedural materials, light baking, dynamic resolution, camera springs at 10 fps, a client
 that stalls while baking, and two rendered end-to-end runs
 (under `xvfb-run` when there is no display; skipped if neither exists).
 

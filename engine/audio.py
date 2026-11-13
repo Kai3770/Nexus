@@ -177,6 +177,45 @@ SOUND_RECIPES = {
 }
 
 
+def _mix(*signals, peak: float = 0.9) -> np.ndarray:
+    """Sum signals of different lengths (padded with silence) and normalise."""
+    out = np.zeros(max(signal.size for signal in signals))
+    for signal in signals:
+        out[: signal.size] += signal
+    return _normalise(out, peak)
+
+
+def spin_whoosh(duration: float, seed: int) -> np.ndarray:
+    """A thrown hatchet: an air whoosh that pulses with the blade's rotation."""
+    t = _time(duration)
+    pulse = 0.45 + 0.55 * np.sin(2.0 * np.pi * 7.0 * t) ** 2
+    return _normalise(whoosh(duration, 300.0, 3500.0, seed) * pulse, 0.7)
+
+
+def crackle(duration: float, seed: int) -> np.ndarray:
+    """Liquid fire catching: a soft roar with random crackles."""
+    rng = np.random.default_rng(seed)
+    t = _time(duration)
+    pops = np.zeros(t.size)
+    for start in rng.integers(0, max(t.size - 400, 1), 48).tolist():
+        length = int(rng.integers(60, 320))
+        pops[start:start + length] += rng.normal(0.0, 1.0, length)[: max(t.size - start, 0)] \
+            * np.exp(-np.arange(length) / (length / 4.0))[: max(t.size - start, 0)]
+    roar = whoosh(duration, 120.0, 2200.0, seed + 1) * 0.8
+    return _mix(roar, _filter(pops, 700.0, 6000.0) * 0.35 * _envelope(t, 0.01, duration * 0.6))
+
+
+SOUND_RECIPES.update({
+    "hatchet": lambda: spin_whoosh(0.42, 220),
+    "hatchet_hit": lambda: _mix(thud(0.20, 170.0, 221, 0.4), click(0.20, 2600.0, 222, 0.6) * 0.5),
+    "stick": lambda: chime((2093.0, 2637.0), 0.07, 0.04),
+    "fire": lambda: crackle(1.1, 223),
+    "shock": lambda: _mix(gunshot(0.55, 150.0, 4200.0, 0.10, 0.2, 224), chime((3136.0,), 0.55, 0.30) * 0.35),
+    "smoke": lambda: whoosh(1.4, 900.0, 7500.0, 225),
+    "stim": lambda: _mix(click(0.08, 2200.0, 226, 0.4) * 0.6, chime((659.0, 988.0, 1319.0), 0.11, 0.07)),
+    "stun_ring": lambda: chime((3520.0,), 1.5, 1.0, 0.1),
+})
+
 # Character of a class: (crack frequency Hz, tail length scale).
 _CLASS_VOICE = {0: (2400.0, 1.0), 1: (3000.0, 0.8), 2: (1500.0, 1.2), 3: (2600.0, 1.1), 4: (2900.0, 0.8),
                 5: (1900.0, 1.1), 6: (3300.0, 1.4)}

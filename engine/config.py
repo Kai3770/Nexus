@@ -112,7 +112,7 @@ BROADCAST_ADDRESS = "255.255.255.255"
 BEACON_INTERVAL = 1.0
 BEACON_EXPIRY = 3.5
 PROTOCOL_MAGIC = 0x584E
-PROTOCOL_VERSION = 10
+PROTOCOL_VERSION = 11
 MAX_DATAGRAM = 1200
 RECV_BUFFER = 4096
 CONNECT_RETRY_INTERVAL = 0.25
@@ -158,11 +158,13 @@ BTN_RELOAD = 1 << 9
 BTN_ADS = 1 << 10
 BTN_SWAP = 1 << 11
 BTN_FIRED = 1 << 12
+BTN_TACTICAL = 1 << 13                    # use the tactical equipment (stim, shock, smoke)
 
 BUTTON_NAMES = {
     BTN_FORWARD: "forward", BTN_LEFT: "left", BTN_BACK: "back", BTN_RIGHT: "right",
     BTN_SLIDE: "slide", BTN_JUMP: "jump", BTN_SHOOT: "shoot", BTN_ABILITY: "ability",
     BTN_SPRINT: "sprint", BTN_RELOAD: "reload", BTN_ADS: "ads", BTN_SWAP: "swap", BTN_FIRED: "fired",
+    BTN_TACTICAL: "tactical",
 }
 
 # Movement state flags ---------------------------------------------------------
@@ -393,17 +395,55 @@ UPGRADE_TABLE = (
 # Operator upgrades never touch the health ceiling or bullet damage.
 OPERATOR_TABLE = (
     ("plating", "BLAST PLATING", 5, 0.06, 500.0, 1.60, "-6% explosive damage taken per level"),
-    ("capacitor", "PULSE CAPACITOR", 10, 0.05, 650.0, 1.55, "-5% pulse grenade cooldown per level"),
+    ("capacitor", "PULSE CAPACITOR", 10, 0.05, 650.0, 1.55, "-5% equipment cooldown per level"),
     ("bounty", "BOUNTY UPLINK", 20, 0.10, 300.0, 1.42, "+10% combat credits per level"),
     ("nanites", "MEDIC NANITES", 8, 0.06, 450.0, 1.65, "-6% health regeneration delay per level"),
 )
 
-# Ability: pulse grenade -------------------------------------------------------
-ABILITY_COOLDOWN = 12.0
-GRENADE_FUSE = 1.6
-GRENADE_SPEED = 19.0
-GRENADE_RADIUS = 6.5
-GRENADE_DAMAGE = 120.0                   # at the centre; falls off with (1 - d / radius)^2
+# Equipment: one LETHAL (key G) and one TACTICAL (key F) per player ---------------------------------
+# Chosen in the EQUIPMENT menu; a change made during a match takes effect at the next respawn.
+EQUIP_LETHAL, EQUIP_TACTICAL = 0, 1
+EQUIP_SLOT_NAMES = ("LETHAL", "TACTICAL")
+EQUIPMENT_KINDS = ("frag", "sticky", "fire", "axe", "stun", "smoke", "stim")
+EQUIPMENT_COLUMNS = ("key", "name", "slot", "kind", "cooldown", "speed", "gravity", "fuse", "radius", "damage",
+                     "duration", "strength", "unlock_cost", "unlock_level", "description")
+# cooldown s | speed m/s, gravity scale (thrown items) | fuse s: frag / stun / smoke detonate after it; a sticky
+# charge after it sticks; a fire flask bursts on impact or after it; an axe falls out of the air after it
+# radius m | damage: at the centre (frag, sticky), per second (fire), on a direct hit (axe), healed (stim)
+# duration s: fire / smoke lifetime, longest stun, stim healing time | strength: movement factor while stunned
+EQUIPMENT_TABLE = (
+    ("pulse", "PULSE GRENADE", 0, "frag", 12.0, 19.0, 1.0, 1.6, 6.5, 120.0, 0.0, 0.0, 0.0, 1,
+     "Bouncing fragmentation grenade on a 1.6 second fuse."),
+    ("hatchet", "RAZOR HATCHET", 0, "axe", 9.0, 26.0, 0.55, 2.0, 0.0, 150.0, 0.0, 0.0, 2000.0, 3,
+     "Thrown axe. A direct hit is lethal, a miss is just a miss."),
+    ("cling", "CLING CHARGE", 0, "sticky", 16.0, 17.0, 1.0, 1.2, 4.5, 140.0, 0.0, 0.0, 3000.0, 5,
+     "Sticks to walls and to people, then detonates. Whoever wears it does not walk away."),
+    ("thermite", "THERMITE FLASK", 0, "fire", 15.0, 16.0, 1.0, 2.5, 3.2, 38.0, 4.0, 0.0, 4500.0, 8,
+     "Shatters on impact into a fire pool: 38 damage per second for four seconds."),
+    ("stim", "NANO STIM", 1, "stim", 16.0, 0.0, 0.0, 0.0, 0.0, 50.0, 1.0, 0.0, 0.0, 1,
+     "Injects 50 health over one second and restarts regeneration at once."),
+    ("shock", "SHOCK GRENADE", 1, "stun", 14.0, 18.0, 1.0, 1.0, 7.0, 0.0, 2.5, 0.55, 1800.0, 2,
+     "Stuns everyone it reaches: slower movement and a shaky aim for up to 2.5 seconds."),
+    ("smoke", "SMOKE CANISTER", 1, "smoke", 18.0, 17.0, 1.0, 1.2, 5.0, 0.0, 8.0, 0.0, 2600.0, 4,
+     "Fills a five metre sphere with smoke for eight seconds; nobody sees through it."),
+)
+DEFAULT_EQUIPMENT_KEYS = ("pulse", "stim")
+EQUIP_KILL_BASE = 200                    # kill-feed weapon id of an equipment kill: base + equipment index
+STICK_DAMAGE_MULT = 1.5                  # a charge stuck to a player hits that player this much harder
+STICK_FLIGHT = 1.8                       # extra seconds a sticky charge may fly before it detonates anyway
+STUN_OWNER_SCALE = 0.5                   # your own shock grenade stuns you for half as long
+STUN_EDGE_SCALE = 0.4                    # stun duration at the edge of the blast, relative to the centre
+STUN_LOOK_SCALE = 0.35                   # mouse sensitivity while stunned (client side)
+FIRE_HEIGHT = 1.9                        # a fire pool burns players whose feet are this close above it
+ZONE_CAPACITY = 16
+STATUS_STUN, STATUS_STIM = 1, 2
+
+# Derived names kept for the pulse grenade (the default lethal).
+ABILITY_COOLDOWN = EQUIPMENT_TABLE[0][4]
+GRENADE_SPEED = EQUIPMENT_TABLE[0][5]
+GRENADE_FUSE = EQUIPMENT_TABLE[0][7]
+GRENADE_RADIUS = EQUIPMENT_TABLE[0][8]
+GRENADE_DAMAGE = EQUIPMENT_TABLE[0][9]   # at the centre; falls off with (1 - d / radius)^2
 GRENADE_RESTITUTION = 0.42
 GRENADE_CAPACITY = 32
 EXPLOSION_KNOCKBACK = 11.0
@@ -433,6 +473,8 @@ AUDIO_CATEGORY = {
     "throw": "movement", "hit": "feedback", "headshot": "feedback", "kill": "feedback",
     "ui_click": "interface", "ui_buy": "interface", "ui_error": "interface",
     "respawn": "announcer", "level_up": "announcer", "victory": "announcer", "defeat": "announcer",
+    "hatchet": "movement", "hatchet_hit": "impact", "stick": "feedback", "fire": "explosion", "shock": "explosion",
+    "smoke": "explosion", "stim": "feedback", "stun_ring": "feedback",
 }
 AUDIO_MIN_GAIN = 0.003                   # quieter cues are not started at all
 AUDIO_DUCK_WINDOW = 0.07                 # seconds; overlapping cues of one category are attenuated

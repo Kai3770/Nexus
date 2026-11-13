@@ -50,6 +50,7 @@ from pathlib import Path
 import numpy as np
 
 from . import config as C
+from . import equipment as EQ
 from . import crypto
 from . import weapons as W
 
@@ -242,6 +243,8 @@ class Profile:
         self.operator = [0] * W.OPERATOR_COUNT
         self.sponsors = [0] * SPONSOR_COUNT
         self.loadout = [W.WEAPON_KEYS[W.DEFAULT_LOADOUT[0]], W.WEAPON_KEYS[W.DEFAULT_LOADOUT[1]]]
+        self.gear = default_gear()
+        self.equipment = [EQ.EQUIP_KEYS[i] for i in EQ.DEFAULT_EQUIPMENT]           # lethal, tactical
         self.stats = {key: 0.0 for key in STAT_KEYS}
         self.settings = dict(DEFAULT_SETTINGS)
         self.integrity_strikes = 0
@@ -252,6 +255,7 @@ class Profile:
             "saved_at": self.saved_at, "credits": self.credits, "lifetime_credits": self.lifetime_credits,
             "xp": self.xp, "level": self.level, "prestige": self.prestige, "weapons": self.weapons,
             "operator": self.operator, "sponsors": self.sponsors, "loadout": self.loadout, "stats": self.stats,
+            "gear": self.gear, "equipment": self.equipment,
             "settings": self.settings, "integrity_strikes": self.integrity_strikes,
         }
 
@@ -288,6 +292,15 @@ class Profile:
         while len(loadout) < W.LOADOUT_SLOTS:
             loadout.append(defaults[len(loadout)])
         p.loadout = loadout
+        gear = raw.get("gear", {})
+        for index, key in enumerate(EQ.EQUIP_KEYS):
+            entry = gear.get(key, {}) if isinstance(gear, dict) else {}
+            entry = entry if isinstance(entry, dict) else {}
+            p.gear[key] = {"unlocked": bool(entry.get("unlocked", False)) or bool(EQ.UNLOCK_COST[index] <= 0.0)}
+        chosen = raw.get("equipment", [])
+        for slot, key in enumerate(list(chosen)[:2] if isinstance(chosen, list) else []):
+            if key in EQ.EQUIP_INDEX and int(EQ.SLOT[EQ.EQUIP_INDEX[key]]) == slot and p.gear[key]["unlocked"]:
+                p.equipment[slot] = key
         stats = raw.get("stats", {})
         for key in STAT_KEYS:
             p.stats[key] = max(float(stats.get(key, 0.0)), 0.0) if isinstance(stats, dict) else 0.0
@@ -305,6 +318,11 @@ class Profile:
         p.settings["fps_limit"] = int(np.clip(p.settings["fps_limit"], 0, 360))
         p.integrity_strikes = max(int(raw.get("integrity_strikes", 0)), 0)
         return p
+
+
+def default_gear() -> dict:
+    """Unlock state of every equipment item for a fresh profile (free items are owned)."""
+    return {key: {"unlocked": bool(EQ.UNLOCK_COST[index] <= 0.0)} for index, key in enumerate(EQ.EQUIP_KEYS)}
 
 
 def sanitize_name(name) -> str:
@@ -577,6 +595,37 @@ class ProfileManager:
     def loadout_blob(self) -> bytes:
         return W.encode_loadout(*self.loadout_arrays())
 
+    # ---- equipment (lethal + tactical) ----------------------------------------------------------
+    def gear_unlock_cost(self, key: str) -> float:
+        return float(EQ.UNLOCK_COST[EQ.EQUIP_INDEX[key]])
+
+    def can_unlock_gear(self, key: str) -> bool:
+        with self.lock:
+            return (not self.profile.gear[key]["unlocked"]
+                    and self.profile.level >= int(EQ.UNLOCK_LEVEL[EQ.EQUIP_INDEX[key]])
+                    and self.profile.credits >= self.gear_unlock_cost(key))
+
+    def unlock_gear(self, key: str) -> bool:
+        with self.lock:
+            if not self.can_unlock_gear(key) or not self.spend(self.gear_unlock_cost(key)):
+                return False
+            self.profile.gear[key]["unlocked"] = True
+            return True
+
+    def equip_gear(self, key: str) -> bool:
+        """Put an owned item into its slot (lethal or tactical)."""
+        with self.lock:
+            if key not in self.profile.gear or not self.profile.gear[key]["unlocked"]:
+                return False
+            self.profile.equipment[int(EQ.SLOT[EQ.EQUIP_INDEX[key]])] = key
+            self.dirty = True
+            return True
+
+    def equipment_ids(self) -> tuple:
+        """``(lethal, tactical)`` equipment ids for the network handshake."""
+        with self.lock:
+            return tuple(EQ.EQUIP_INDEX[key] for key in self.profile.equipment)
+
     # ---- operator upgrades --------------------------------------------------------------------
     def operator_costs(self) -> np.ndarray:
         with self.lock:
@@ -631,6 +680,8 @@ class ProfileManager:
                 p.weapons[key] = {"unlocked": bool(W.WEAPONS["unlock_cost"][index] <= 0.0),
                                   "levels": [0] * W.UPGRADE_COUNT}
             p.loadout = [W.WEAPON_KEYS[i] for i in W.DEFAULT_LOADOUT]
+            p.gear = default_gear()
+            p.equipment = [EQ.EQUIP_KEYS[i] for i in EQ.DEFAULT_EQUIPMENT]
             self.dirty = True
             return True
 

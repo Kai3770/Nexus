@@ -49,6 +49,7 @@ from panda3d.core import (BitMask32, Camera as PandaCamera, ColorBlendAttrib, Cu
 from ursina import Entity, Text, application, camera, color, scene, window
 
 from . import config as C
+from . import equipment as EQ
 from . import mathx as M
 from . import maps
 from . import textures
@@ -364,6 +365,7 @@ uniform sampler2D u_bloom_tex;
 uniform vec4 u_kick;        // xy = recoil kick-back offset (uv), z = punch zoom, w = white flash
 uniform vec4 u_impact;      // x = chromatic aberration, y = damage vignette, z = desaturation, w = static vignette
 uniform vec3 u_shake;       // xy = explosion shake jitter (uv), z = bloom strength
+uniform vec2 u_status;      // x = stim glow, y = stun haze
 in vec2 uv;
 out vec4 fragColor;
 void main() {
@@ -381,6 +383,8 @@ void main() {
     col = mix(col, vec3(luma), u_impact.z);
     float edge = smoothstep(0.08, 0.55, r2 * 2.0);
     col = mix(col, vec3(0.45, 0.01, 0.01) + col * vec3(0.9, 0.30, 0.30), u_impact.y * edge * 0.75);
+    col = mix(col, vec3(0.08, 0.50, 0.22) + col * vec3(0.55, 1.05, 0.65), u_status.x * edge * 0.42);
+    col = mix(col, vec3(dot(col, vec3(0.299, 0.587, 0.114))) * 1.1 + vec3(0.14, 0.15, 0.17), u_status.y * 0.55);
     col *= 1.0 - u_impact.w * r2 * 1.6;
     col += vec3(u_kick.w);
     fragColor = vec4(col, 1.0);
@@ -1303,6 +1307,93 @@ PART_UV = np.stack([(_BOX_U[None] + 1.0) * PART_STAND_HALF[:, worldmesh.UV_AXIS_
                     (_BOX_V[None] + 1.0) * PART_STAND_HALF[:, worldmesh.UV_AXIS_V][:, :, None]], axis=-1) * 2.0
 
 
+def oriented_box_vertices(centers, axes, halves, colors, layer, emissive) -> np.ndarray:
+    """
+    ``WORLD_VERTEX`` data of boxes with their own orientation: ``axes`` is
+    ``(B, 3, 3)`` whose rows are the box's local x, y and z directions in world
+    space (a right-handed basis keeps the winding valid).
+    """
+    centers = np.asarray(centers, dtype=np.float64).reshape(-1, 3)
+    axes = np.asarray(axes, dtype=np.float64).reshape(-1, 3, 3)
+    halves = np.asarray(halves, dtype=np.float64).reshape(-1, 3)
+    count = centers.shape[0]
+    local = BOX_LOCAL[None] * halves[:, None, None, :]                                     # (B, 6, 4, 3)
+    out = np.zeros(count * 24, dtype=WORLD_VERTEX)
+    out["pos"] = (centers[:, None, None, :] + np.einsum("bfvk,bkj->bfvj", local, axes)).reshape(-1, 3)
+    out["nrm"] = np.einsum("fvk,bkj->bfvj", BOX_NORMAL, axes).reshape(-1, 3)
+    out["col"] = np.repeat(np.asarray(colors, dtype=np.float32).reshape(count, 4), 24, axis=0)
+    out["uv"][:, 0] = ((_BOX_U[None] + 1.0) * halves[:, worldmesh.UV_AXIS_U][:, :, None] * 4.0).reshape(-1)
+    out["uv"][:, 1] = ((_BOX_V[None] + 1.0) * halves[:, worldmesh.UV_AXIS_V][:, :, None] * 4.0).reshape(-1)
+    out["uv"][:, 2] = np.repeat(np.broadcast_to(np.asarray(layer, dtype=np.float32), (count,)), 24)
+    out["uv"][:, 3] = np.repeat(np.broadcast_to(np.asarray(emissive, dtype=np.float32), (count,)), 24)
+    return out
+
+
+def _basis(forward: np.ndarray, spin: float = 0.0) -> np.ndarray:
+    """Right-handed (right, up, forward) rows around ``forward``, rolled by ``spin`` about the right axis."""
+    f = forward / max(float(np.linalg.norm(forward)), 1.0e-9)
+    helper = np.array([0.0, 1.0, 0.0]) if abs(f[1]) < 0.95 else np.array([1.0, 0.0, 0.0])
+    r = np.cross(helper, f)
+    r /= max(float(np.linalg.norm(r)), 1.0e-9)
+    u = np.cross(f, r)
+    c, s = math.cos(spin), math.sin(spin)
+    return np.stack([r, u * c - f * s, f * c + u * s])
+
+
+_DARK_METAL = (0.30, 0.32, 0.36, 1.0)
+_HANDLE = (0.42, 0.26, 0.14, 1.0)
+
+
+def equipment_vertices(gs, time_now: float) -> np.ndarray:
+    """Every live thrown item (grenade, charge, flask, hatchet, canister) as a few oriented boxes."""
+    slots = np.flatnonzero(gs.active)[: C.GRENADE_CAPACITY]
+    if slots.size == 0:
+        return EMPTY_WORLD
+    centers, axes, halves, colors, layers, glows = [], [], [], [], [], []
+
+    def part(centre, basis, half, rgba, layer, glow):
+        centers.append(centre)
+        axes.append(basis)
+        halves.append(half)
+        colors.append(rgba)
+        layers.append(float(maps.LAYER[layer]))
+        glows.append(glow)
+
+    for slot in slots.tolist():
+        equip = int(gs.equip[slot])
+        kind = int(EQ.KIND[equip])
+        p = gs.pos[slot]
+        flying = not bool(gs.stuck[slot])
+        spin = (time_now * 18.0 + slot) if flying else 0.6
+        basis = _basis(gs.heading[slot], spin if kind in (EQ.KIND_AXE, EQ.KIND_FRAG) else 0.0)
+        if kind == EQ.KIND_AXE:
+            f, u = basis[2], basis[1]
+            handle = p - f * (0.0 if flying else 0.12)
+            part(handle, basis, (0.014, 0.014, 0.15), _HANDLE, "crate", 0.0)
+            part(handle + f * 0.12 + u * 0.035, basis, (0.010, 0.055, 0.045), (0.80, 0.82, 0.86, 1.0), "metal", 0.0)
+        elif kind == EQ.KIND_FRAG:
+            pulse = 0.75 + 0.25 * math.sin(time_now * 22.0 + slot)
+            part(p, basis, (0.065, 0.065, 0.065), (pulse, 0.35 * pulse, 0.12, 1.0), "glow", 1.2)
+        elif kind == EQ.KIND_STICKY:
+            blink = 1.0 if math.sin(time_now * (40.0 if gs.stuck[slot] else 20.0) + slot) > 0.0 else 0.15
+            upright = _basis(gs.normal[slot] if gs.stuck[slot] else np.array([0.0, 0.0, 1.0]))
+            part(p, upright, (0.055, 0.055, 0.035), _DARK_METAL, "metal", 0.0)
+            part(p + upright[2] * 0.04, upright, (0.02, 0.02, 0.012), (1.0, 0.12, 0.10, 1.0), "glow", 1.5 * blink)
+        elif kind == EQ.KIND_FIRE:
+            upright = _basis(np.array([0.0, 0.0, 1.0]))
+            part(p, upright, (0.042, 0.065, 0.042), (1.0, 0.62, 0.16, 1.0), "glass", 0.8)
+            part(p + np.array([0.0, 0.085, 0.0]), upright, (0.016, 0.025, 0.016), _DARK_METAL, "metal", 0.0)
+        elif kind == EQ.KIND_STUN:
+            pulse = 0.7 + 0.3 * math.sin(time_now * 30.0 + slot)
+            part(p, basis, (0.055, 0.055, 0.055), (0.65 * pulse, 0.85 * pulse, 1.0, 1.0), "glow", 1.0)
+        else:                                                                       # smoke canister
+            upright = _basis(np.array([0.0, 0.0, 1.0]))
+            part(p, upright, (0.042, 0.080, 0.042), (0.55, 0.58, 0.60, 1.0), "metal", 0.0)
+            part(p + np.array([0.0, 0.03, 0.0]), upright, (0.045, 0.010, 0.045), (0.30, 1.0, 0.45, 1.0), "glow", 0.9)
+    return oriented_box_vertices(np.array(centers), np.array(axes), np.array(halves), np.array(colors),
+                                 np.array(layers), np.array(glows))
+
+
 class CharacterBatch:
     """
     Draws every visible remote player (and live grenades) from one vertex
@@ -1316,7 +1407,7 @@ class CharacterBatch:
         self.capacity = int(capacity)
         self.phase = np.zeros(self.capacity, dtype=np.float64)
         self.flash = np.zeros(self.capacity, dtype=np.float64)
-        quads = (self.capacity * PART_COUNT + C.GRENADE_CAPACITY) * 6
+        quads = (self.capacity * PART_COUNT + C.GRENADE_CAPACITY * 3) * 6
         self.mesh = DynamicMesh("characters", quads, parent, None, WORLD_VERTEX)
         self.mesh.node.hide(SHADOW_STATIC_MASK)
         self.drawn = 0
@@ -1399,7 +1490,11 @@ class CharacterBatch:
             if irradiance is not None:
                 out["light"] = np.repeat(irradiance(view.pos[rows] + np.array([0.0, 1.1, 0.0])), per_player, axis=0)
             blocks.append(out)
-        if grenade_pos is not None and len(grenade_pos):
+        if grenade_pos is not None and hasattr(grenade_pos, "active"):
+            gear = equipment_vertices(grenade_pos, time_now)
+            if gear.size:
+                blocks.append(gear)
+        elif grenade_pos is not None and len(grenade_pos):
             g = np.asarray(grenade_pos, dtype=np.float64).reshape(-1, 3)[: C.GRENADE_CAPACITY]
             pulse = 0.75 + 0.25 * math.sin(time_now * 22.0)
             colors = np.tile(np.array([1.0 * pulse, 0.35 * pulse, 0.12, 1.0]), (g.shape[0], 1))
@@ -1555,6 +1650,8 @@ class PostFX:
         self.flash = 0.0
         self.desaturation = 0.0
         self.vignette = 0.55
+        self.heal = 0.0
+        self.stun = 0.0
         self.bloom = False
         self.bloom_buffers: list = []
         self.black = Texture("black")
@@ -1613,16 +1710,28 @@ class PostFX:
     def add_flash(self, strength: float) -> None:
         self.flash = min(0.8, self.flash + strength)
 
+    def add_heal(self, strength: float) -> None:
+        """Green edge glow of a stim injection."""
+        self.heal = min(1.0, self.heal + strength)
+
+    def set_stun(self, level: float) -> None:
+        """Washed-out haze while stunned (0..1, set every frame)."""
+        self.stun = min(max(float(level), 0.0), 1.0)
+
     def _push(self, kick_x: float, kick_y: float, zoom: float, shake) -> None:
         self.quad.setShaderInput("u_kick", LVecBase4f(kick_x, kick_y, zoom, self.flash))
         self.quad.setShaderInput("u_impact", LVecBase4f(self.aberration * 0.035, self.damage, self.desaturation,
                                                         self.vignette))
         self.quad.setShaderInput("u_shake", (float(shake[0]), float(shake[1]), C.BLOOM_STRENGTH if self.bloom else 0.0))
+        self.quad.setShaderInput("u_status", (float(self.heal), float(self.stun)))
 
     def update(self, dt: float, rig, health_fraction: float, alive: bool) -> None:
         self.aberration *= math.exp(-5.0 * dt)
         self.damage *= math.exp(-4.5 * dt)
         self.flash *= math.exp(-9.0 * dt)
+        self.heal *= math.exp(-2.2 * dt)
+        if self.stun > 0.0:
+            self.aberration = max(self.aberration, 0.35 * self.stun)
         target = min(max(1.0 - health_fraction * 2.4, 0.0), 0.75) if alive else 0.85
         self.desaturation += (target - self.desaturation) * (1.0 - math.exp(-6.0 * dt))
         if not self.enabled:
@@ -2036,6 +2145,7 @@ class SceneRenderer:
         root, fx = self.world.root, self.world.fx_shader
         self.sparks = ParticlePool("sparks", 1024, root, fx, "add", seed=11)
         self.smoke = ParticlePool("smoke", 384, root, fx, "alpha", seed=12)
+        self.clouds = ParticlePool("clouds", 640, root, fx, "alpha", seed=13)            # smoke grenades
         self.tracers = TracerPool(160, root, fx)
         self.decals = DecalPool(256, root, fx)
         self.characters = CharacterBatch(root)
@@ -2136,6 +2246,38 @@ class SceneRenderer:
         self.lights.explosion(position)
         self.decals.add(position - np.array([0.0, 0.05, 0.0]), (0.0, 1.0, 0.0), size=1.1, rgba=(0.02, 0.02, 0.02, 0.7))
 
+    def fx_stun(self, position) -> None:
+        """Shock grenade: a white-blue flash and a ring of sparks."""
+        position = np.asarray(position, dtype=np.float64)
+        self.sparks.emit(position, self._amount(46), speed=(5.0, 15.0), rgba=(0.75, 0.88, 1.0, 1.0), size=(0.07, 0.01),
+                         life=(0.12, 0.32), gravity=0.1)
+        self.lights.explosion(position, rgb=(0.70, 0.85, 1.0), intensity=70.0, duration=0.22)
+
+    def fx_fire(self, position, radius: float, dt: float, burst: bool = False) -> None:
+        """A burning fire pool: flames, embers and dark smoke (call every frame while it burns)."""
+        position = np.asarray(position, dtype=np.float64)
+        base = position + np.array([0.0, 0.12, 0.0])
+        count = self._amount(55) if burst else int(self.sparks.rng.poisson(75.0 * self.particle_scale * dt))
+        if count:
+            self.sparks.emit(base, count, direction=(0.0, 1.0, 0.0), spread=0.45, speed=(0.5, 2.4),
+                             rgba=(1.0, 0.52, 0.14, 0.9), size=(0.32, 0.04), life=(0.22, 0.62), gravity=-0.22,
+                             jitter=radius * 0.42)
+        if burst or self.smoke.rng.random() < 6.0 * dt:
+            self.smoke.emit(base + np.array([0.0, 0.8, 0.0]), 3 if burst else 1, speed=(0.2, 0.7),
+                            rgba=(0.10, 0.09, 0.08, 0.40), size=(0.4, 1.7), life=(1.0, 1.9), gravity=-0.08, drag=0.8,
+                            jitter=radius * 0.3)
+        if burst:
+            self.lights.explosion(base, rgb=(1.0, 0.55, 0.2), intensity=45.0, duration=0.3)
+
+    def fx_smoke(self, position, radius: float, dt: float, burst: bool = False) -> None:
+        """A smoke canister's cloud (call every frame while it lasts)."""
+        centre = np.asarray(position, dtype=np.float64) + np.array([0.0, 1.0, 0.0])
+        count = self._amount(70) if burst else int(self.clouds.rng.poisson(32.0 * dt * max(self.particle_scale, 0.75)))
+        if count:
+            self.clouds.emit(centre, count, speed=(0.1, 0.7), rgba=(0.62, 0.64, 0.66, 0.55),
+                             size=(radius * 0.30, radius * 0.62), life=(2.6, 3.8), gravity=-0.02, drag=1.4,
+                             jitter=radius * 0.38)
+
     def fx_damage_number(self, position, amount: float, headshot: bool = False, killed: bool = False) -> None:
         rgb = (1.0, 0.10, 0.16) if headshot else ((1.0, 0.78, 0.20) if killed else (1.0, 1.0, 1.0))
         self.damage_text.spawn(position, amount, rgb, 1.35 if headshot else 1.0)
@@ -2151,10 +2293,12 @@ class SceneRenderer:
         self.lights.write()
         self.sparks.update(dt)
         self.smoke.update(dt)
+        self.clouds.update(dt)
         self.tracers.update(dt)
         self.damage_text.update(dt)
         self.sparks.build(self.right, self.up)
         self.smoke.build(self.right, self.up)
+        self.clouds.build(self.right, self.up)
         self.tracers.build(cam_pos)
         self.decals.build()
         self.characters.build(view, skip_player, dt, time_now, grenade_pos, self.world.static_irradiance)
@@ -2175,8 +2319,9 @@ HUD_DIM = (0.62, 0.68, 0.76)
 HITMARKER_TIME = 0.24
 CROSSHAIR_ARM = 0.011
 HEALTH_WIDTH = 0.246
-ABILITY_WIDTH = 0.30
-(Q_CROSS, Q_DOT, Q_HIT, Q_INDICATOR, Q_HEALTH_BACK, Q_HEALTH, Q_ABILITY_BACK, Q_ABILITY, HUD_QUADS) = (0, 4, 5, 9, 15, 16, 17, 18, 19)
+ABILITY_WIDTH = 0.142
+(Q_CROSS, Q_DOT, Q_HIT, Q_INDICATOR, Q_HEALTH_BACK, Q_HEALTH, Q_ABILITY_BACK, Q_ABILITY, Q_TACTICAL_BACK, Q_TACTICAL,
+ HUD_QUADS) = (0, 4, 5, 9, 15, 16, 17, 18, 19, 20, 21)
 
 
 class HUD:
@@ -2238,7 +2383,11 @@ class HUD:
         self.ability_left = hw - 0.345
         self._bar(Q_ABILITY_BACK, self.ability_left, -0.470, ABILITY_WIDTH, 0.007, (0.05, 0.06, 0.08), 0.70)
         self._bar(Q_ABILITY, self.ability_left, -0.470, ABILITY_WIDTH, 0.005, (1.0, 0.55, 0.20), 0.95)
-        self.ability_text = self._text("PULSE GRENADE [G]", hw - 0.345, -0.487, 0.6, (-0.5, 0), HUD_DIM)
+        self.ability_text = self._text("PULSE GRENADE [G]", hw - 0.345, -0.487, 0.5, (-0.5, 0), HUD_DIM)
+        self.tactical_left = hw - 0.045 - ABILITY_WIDTH
+        self._bar(Q_TACTICAL_BACK, self.tactical_left, -0.470, ABILITY_WIDTH, 0.007, (0.05, 0.06, 0.08), 0.70)
+        self._bar(Q_TACTICAL, self.tactical_left, -0.470, ABILITY_WIDTH, 0.005, (0.35, 0.95, 0.65), 0.95)
+        self.tactical_text = self._text("NANO STIM [F]", self.tactical_left, -0.487, 0.5, (-0.5, 0), HUD_DIM)
         # ---- match -----------------------------------------------------------------------------------
         self.score_text = self._text("", 0.0, 0.462, 1.25, (0, 0), HUD_WHITE)
         self.mode_text = self._text("", 0.0, 0.432, 0.68, (0, 0), HUD_DIM)
@@ -2372,9 +2521,20 @@ class HUD:
         self._color(self.ammo_text, HUD_CRIMSON if ammo * 4 <= magazine else HUD_WHITE)
 
     def set_ability(self, ready_fraction: float) -> None:
+        """Lethal cooldown bar (orange when ready)."""
         fraction = min(max(ready_fraction, 0.0), 1.0)
         rgb, alpha = ((1.0, 0.55, 0.20), 0.95) if fraction >= 1.0 else ((0.55, 0.60, 0.68), 0.9)
         self._bar(Q_ABILITY, self.ability_left, -0.470, ABILITY_WIDTH * fraction, 0.005, rgb, alpha if fraction > 0.0 else 0.0)
+
+    def set_equipment(self, lethal_name: str, lethal_ready: float, tactical_name: str, tactical_ready: float) -> None:
+        """Both equipment slots: names with their keys and cooldown bars (full and bright when ready)."""
+        self.set_ability(lethal_ready)
+        fraction = min(max(tactical_ready, 0.0), 1.0)
+        rgb, alpha = ((0.35, 0.95, 0.65), 0.95) if fraction >= 1.0 else ((0.55, 0.60, 0.68), 0.9)
+        self._bar(Q_TACTICAL, self.tactical_left, -0.470, ABILITY_WIDTH * fraction, 0.005, rgb,
+                  alpha if fraction > 0.0 else 0.0)
+        self._set(self.ability_text, "%s [G]" % lethal_name)
+        self._set(self.tactical_text, "%s [F]" % tactical_name)
 
     def set_match(self, mode: int, scores, seconds_left: int, own_team: int, own_kills: int, limit: int) -> None:
         minutes, seconds = divmod(max(int(seconds_left), 0), 60)

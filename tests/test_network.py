@@ -59,14 +59,18 @@ def test_snapshot_entity_delta_codec():
 def test_event_codec_round_trip():
     events = [(S.EV_HIT, 1, 2, 26.4, 0, True, (1.5, 2.25, -3.0)), (S.EV_DAMAGE, 2, 1, 26.4, 1, (4.0, 0.0, 1.0)),
               (S.EV_KILL, 1, 2, 3, 1), (S.EV_SPAWN, 4, (1.0, 0.0, 2.0), 1.5), (S.EV_SHOT, 1, 0, (0, 1.5, 0), (10, 1.5, 30)),
-              (S.EV_EXPLOSION, (1, 2, 3), 255, 7), (S.EV_GRENADE, 7, 1, (0, 1, 2), (5, 6, -7), 96, 12345),
+              (S.EV_EXPLOSION, (1, 2, 3), 255, 7, 3), (S.EV_GRENADE, 7, 1, (0, 1, 2), (5, 6, -7), 96, 12345, 2),
               (S.EV_REWARD, 1, 125, 100, 1), (S.EV_MATCH, 2, 0, 1, 0)]
     for event in events:
         blob = N.encode_event(event)
         decoded, offset = N.decode_event(blob, 0)
         assert offset == len(blob) and decoded[0] == event[0]
     assert N.decode_event(N.encode_event(events[0]), 0)[0] == (S.EV_HIT, 2, 26.4, 0, True, (1.5, 2.25, -3.0))
-    assert N.decode_event(N.encode_event(events[6]), 0)[0] == (S.EV_GRENADE, 7, 1, (0.0, 1.0, 2.0), (5.0, 6.0, -7.0), 96, 12345)
+    assert N.decode_event(N.encode_event(events[6]), 0)[0] == (S.EV_GRENADE, 7, 1, (0.0, 1.0, 2.0), (5.0, 6.0, -7.0), 96, 12345, 2)
+    assert N.decode_event(N.encode_event(events[5]), 0)[0] == (S.EV_EXPLOSION, (1.0, 2.0, 3.0), 255, 7, 3)
+    stick = N.decode_event(N.encode_event((S.EV_STICK, 9, 4, (1.5, 0.25, -2.0))), 0)[0]
+    assert stick == (S.EV_STICK, 9, 4, (1.5, 0.25, -2.0))
+    assert N.decode_event(N.encode_event((S.EV_STATUS, 3, C.STATUS_STUN, 150)), 0)[0] == (S.EV_STATUS, C.STATUS_STUN, 150)
     spawn = N.decode_event(N.encode_event(events[3]), 0)[0]
     assert abs(spawn[3] - 1.5) < 1e-3
     assert N.decode_event(N.encode_event(events[8]), 0)[0] == (S.EV_MATCH, 2, 0, 1, 0, 0)
@@ -286,7 +290,7 @@ def test_live_session_rollback_under_latency_jitter_and_loss():
             eye = alpha.predictor.store.eye_position(0)[0]
             yaw, pitch = M.yaw_pitch_from_direction(view.pos[bravo.pid] + np.array([0.0, 1.22, 0.0]) - eye)
             buttons = C.BTN_SHOOT                                               # aim at the *interpolated* image
-        fired, _ = alpha.send_command(buttons, float(yaw), float(pitch))
+        fired, _, _ = alpha.send_command(buttons, float(yaw), float(pitch))
         state["shots"] += fired
         bravo.send_command((C.BTN_LEFT if int(t / 0.7) % 2 else C.BTN_RIGHT) if t > 2.0 else 0, np.pi, 0.0)
 
@@ -406,5 +410,33 @@ def test_a_stalled_main_thread_does_not_lose_the_connection():
         assert client.state == N.CONNECTED and client.predictor.corrections < 30
     finally:
         C.CONNECTION_TIMEOUT, C.KEEPALIVE_INTERVAL = original
+        client.disconnect()
+        server.stop()
+
+
+def test_equipment_choice_travels_with_connect_and_frames():
+    from engine import equipment as EQ
+    chosen = (EQ.EQUIP_INDEX["hatchet"], EQ.EQUIP_INDEX["smoke"])
+    server = N.host_local_game(N.ServerConfig(name="GEAR", map_key="crucible", bot_fill=0, beacon=False, port=28170))
+    client = make_client("gear", equipment=chosen)
+    try:
+        client.connect("127.0.0.1", server.port)
+        deadline = time.time() + 3.0
+        while time.time() < deadline and not (client.state == N.CONNECTED and client.predictor.initialised):
+            client.update()
+            time.sleep(0.01)
+        assert client.state == N.CONNECTED
+        store = server.world.store
+        assert tuple(int(v) for v in store.equip[client.pid]) == chosen                 # applied at the first spawn
+        changed = (EQ.EQUIP_INDEX["cling"], EQ.EQUIP_INDEX["shock"])
+        client.equipment = changed
+        for _ in range(20):
+            client.update()
+            client.send_command(0, 0.0, 0.0)
+            time.sleep(C.TICK_DT)
+        assert tuple(int(v) for v in store.pending_equip[client.pid]) == changed           # queued for the respawn
+        assert tuple(int(v) for v in store.equip[client.pid]) == chosen
+        assert tuple(int(v) for v in client.predictor.store.equip[0]) == chosen            # prediction agrees
+    finally:
         client.disconnect()
         server.stop()

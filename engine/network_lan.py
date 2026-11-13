@@ -45,6 +45,7 @@ import numpy as np
 from . import bots as B
 from . import config as C
 from . import crypto
+from . import equipment as EQ
 from . import maps
 from . import mathx as M
 from . import simulation as S
@@ -67,7 +68,9 @@ BEACON_STRUCT = struct.Struct("<HHBBBBBBIIB")      # protocol, port, humans, max
 CONNECT_REQ = struct.Struct("<HIBB")               # protocol, nonce, preferred team, name length (+ name + loadout)
 CONNECT_ACK = struct.Struct("<IBIBBBBIBBHHI")      # nonce, id, tick, rate, map, mode, team, token, max, upgrades, score, time, map crc
 CONNECT_DENY = struct.Struct("<IB")
-FRAME_HEADER = struct.Struct("<IIIIHBB")           # ack snapshot, ack event, client ms, newest cmd, ping, n cmds, n fire
+FRAME_HEADER = struct.Struct("<IIIIHBBBB")         # ack snapshot, ack event, client ms, newest cmd, ping, n cmds, n fire,
+#                                                    requested lethal, requested tactical
+EQUIP_BLOB = struct.Struct("<BB")                  # lethal, tactical (appended to the connect request)
 FIRE_RECORD = struct.Struct("<HIIB")               # shot seq, command tick, client view time (ms), weapon slot
 SNAP_HEADER = struct.Struct("<IIIHIHBBB")          # tick, baseline, ack cmd, ack shot, echo ms, hold ms, flags, n rel, n transient
 MATCH_STATE = struct.Struct("<HHHBB")              # score 0, score 1, seconds left, phase, winner
@@ -93,8 +96,10 @@ _EVENT_FORMATS = {
     S.EV_KILL: struct.Struct("<BBBB"),              # killer, victim, weapon, flags
     S.EV_SPAWN: struct.Struct("<BhhhH"),            # player, position, yaw
     S.EV_SHOT: struct.Struct("<BBhhhhhh"),          # shooter, weapon, origin, end
-    S.EV_EXPLOSION: struct.Struct("<hhhBB"),        # position, owner, grenade id
-    S.EV_GRENADE: struct.Struct("<BBhhhhhhHI"),     # id, owner, position, velocity, fuse, spawn tick
+    S.EV_EXPLOSION: struct.Struct("<hhhBBB"),       # position, owner, grenade id, equipment
+    S.EV_GRENADE: struct.Struct("<BBhhhhhhHIB"),    # id, owner, position, velocity, fuse, spawn tick, equipment
+    S.EV_STICK: struct.Struct("<BBhhh"),            # grenade id, target (255: a wall), position
+    S.EV_STATUS: struct.Struct("<BH"),              # status, ticks
     S.EV_REWARD: struct.Struct("<IHB"),             # credits, xp, reason
     S.EV_MATCH: struct.Struct("<BBBBI"),            # phase, winner, map, mode, map crc
 }
@@ -306,10 +311,15 @@ def encode_event(event: tuple) -> bytes:
     elif kind == S.EV_SHOT:
         body = fmt.pack(event[1], event[2] & 0xFF, *quantize_position(event[3]), *quantize_position(event[4]))
     elif kind == S.EV_EXPLOSION:
-        body = fmt.pack(*quantize_position(event[1]), event[2] & 0xFF, event[3] & 0xFF)
+        body = fmt.pack(*quantize_position(event[1]), event[2] & 0xFF, event[3] & 0xFF,
+                        (event[4] if len(event) > 4 else 0) & 0xFF)
     elif kind == S.EV_GRENADE:
         body = fmt.pack(event[1] & 0xFF, event[2] & 0xFF, *quantize_position(event[3]), *quantize_velocity(event[4]),
-                        min(int(event[5]), 65535), int(event[6]) & 0xFFFFFFFF)
+                        min(int(event[5]), 65535), int(event[6]) & 0xFFFFFFFF, (event[7] if len(event) > 7 else 0) & 0xFF)
+    elif kind == S.EV_STICK:
+        body = fmt.pack(event[1] & 0xFF, event[2] & 0xFF, *quantize_position(event[3]))
+    elif kind == S.EV_STATUS:
+        body = fmt.pack(event[2] & 0xFF, min(int(event[3]), 65535))
     elif kind == S.EV_REWARD:
         body = fmt.pack(int(event[2]) & 0xFFFFFFFF, min(int(event[3]), 65535), event[4])
     elif kind == S.EV_MATCH:
@@ -336,9 +346,13 @@ def decode_event(data: bytes, offset: int):
     elif kind == S.EV_SHOT:
         event = (kind, f[0], f[1], _unq(f[2:5], C.POS_QUANT), _unq(f[5:8], C.POS_QUANT))
     elif kind == S.EV_EXPLOSION:
-        event = (kind, _unq(f[0:3], C.POS_QUANT), f[3], f[4])
+        event = (kind, _unq(f[0:3], C.POS_QUANT), f[3], f[4], f[5])
     elif kind == S.EV_GRENADE:
-        event = (kind, f[0], f[1], _unq(f[2:5], C.POS_QUANT), _unq(f[5:8], C.VEL_QUANT), f[8], f[9])
+        event = (kind, f[0], f[1], _unq(f[2:5], C.POS_QUANT), _unq(f[5:8], C.VEL_QUANT), f[8], f[9], f[10])
+    elif kind == S.EV_STICK:
+        event = (kind, f[0], f[1], _unq(f[2:5], C.POS_QUANT))
+    elif kind == S.EV_STATUS:
+        event = (kind, f[0], f[1])
     elif kind == S.EV_REWARD:
         event = (kind, f[0], f[1], f[2])
     else:
@@ -947,6 +961,9 @@ class GameServer:
         offset += name_len
         try:
             weapon_ids, levels, operator, prestige = W.decode_loadout(data[offset: offset + W.LOADOUT_BLOB_SIZE])
+            offset += W.LOADOUT_BLOB_SIZE
+            equipment = EQ.sanitize(EQUIP_BLOB.unpack_from(data, offset)) if len(data) >= offset + EQUIP_BLOB.size \
+                else EQ.DEFAULT_EQUIPMENT
         except ValueError:
             self._send_raw(make_packet(PKT_CONNECT_DENY, 0, CONNECT_DENY.pack(nonce, DENY_BAD_REQUEST)), addr)
             return
@@ -961,7 +978,7 @@ class GameServer:
             if bots.size:
                 world.remove_player(int(bots[-1]))
         team = team_pref if team_pref in (0, 1) else None
-        pid = world.add_player(name, False, weapon_ids, levels, operator, prestige, team)
+        pid = world.add_player(name, False, weapon_ids, levels, operator, prestige, team, equipment)
         if pid < 0:
             self._send_raw(make_packet(PKT_CONNECT_DENY, 0, CONNECT_DENY.pack(nonce, DENY_FULL)), addr)
             return
@@ -983,8 +1000,10 @@ class GameServer:
         self._send_raw(make_packet(PKT_CONNECT_ACK, conn.token, payload), conn.addr)
 
     def _handle_frame(self, conn: Connection, data: bytes, offset: int, received: float) -> None:
-        ack_snapshot, ack_event, client_ms, newest, ping, n_cmds, n_fire = FRAME_HEADER.unpack_from(data, offset)
+        (ack_snapshot, ack_event, client_ms, newest, ping, n_cmds, n_fire, lethal,
+         tactical) = FRAME_HEADER.unpack_from(data, offset)
         offset += FRAME_HEADER.size
+        self.world.request_equipment(conn.pid, (lethal, tactical))
         conn.ack_snapshot = ack_snapshot
         conn.echo_time = client_ms
         conn.echo_recv = received
@@ -1031,7 +1050,9 @@ class GameServer:
             index = int(np.flatnonzero(~world.store.active)[0]) if np.any(~world.store.active) else 0
             primary = W.WEAPON_INDEX[BOT_PRIMARIES[self._rng.randrange(len(BOT_PRIMARIES))]]
             secondary = W.WEAPON_INDEX[BOT_SECONDARIES[self._rng.randrange(len(BOT_SECONDARIES))]]
-            world.add_player("BOT " + BOT_NAMES[index % len(BOT_NAMES)], True, (primary, secondary))
+            equipment = (EQ.LETHALS[self._rng.randrange(len(EQ.LETHALS))],
+                         EQ.TACTICALS[self._rng.randrange(len(EQ.TACTICALS))])
+            world.add_player("BOT " + BOT_NAMES[index % len(BOT_NAMES)], True, (primary, secondary), equipment=equipment)
             self.last_roster = 0.0
         elif bots.size > target:
             teams = world.store.team[bots]
@@ -1145,7 +1166,7 @@ class GameServer:
                 conn = by_pid.get(event[1])
                 if conn is not None:
                     self._queue_reliable(conn, blob)
-            elif kind == S.EV_DAMAGE:
+            elif kind in (S.EV_DAMAGE, S.EV_STATUS):
                 conn = by_pid.get(event[1])
                 if conn is not None:
                     self._queue_reliable(conn, blob)
@@ -1274,6 +1295,7 @@ class Predictor:
         self.c_vel = np.zeros((cap, 3), dtype=np.float64)
         self.c_flags = np.zeros(cap, dtype=np.uint16)
         self.c_weapon = np.zeros((cap, 4), dtype=np.int64)      # slot, ammo in hand, reload end, alive
+        self.c_equip = np.zeros((cap, 4), dtype=np.int64)       # lethal ready, tactical ready, stun until, equipment
         self.newest_tick = -1
         self.acked_tick = -1
         self.visual_error = np.zeros(3, dtype=np.float64)
@@ -1295,18 +1317,20 @@ class Predictor:
         self.c_flags[index] = st.move.mflags[0]
         slot = int(st.weapons.slot[0])
         self.c_weapon[index] = (slot, st.weapons.ammo[0, slot], st.weapons.reload_end[0], int(st.alive[0]))
+        self.c_equip[index] = (st.ability_ready[0], st.tactical_ready[0], st.stun_until[0],
+                               int(st.equip[0, 0]) * 256 + int(st.equip[0, 1]))
 
     def predict(self, tick: int, buttons: int, yaw: float, pitch: float):
-        """Execute one new command immediately; returns ``(fired, ability_used)``."""
+        """Execute one new command immediately; returns ``(fired, lethal_used, tactical_used)``."""
         index = tick % self.capacity
         self.c_tick[index] = tick
         self.c_buttons[index] = buttons
         self.c_yaw[index] = yaw
         self.c_pitch[index] = pitch
-        fired, ability = simulate_commands(self.store, self.world, _ROW0, buttons, yaw, pitch, tick)
+        fired, lethal, tactical = simulate_commands(self.store, self.world, _ROW0, buttons, yaw, pitch, tick)
         self._remember(index)
         self.newest_tick = tick
-        return bool(fired[0]), bool(ability[0])
+        return bool(fired[0]), bool(lethal[0]), bool(tactical[0])
 
     def reconcile(self, ack_tick: int, payload: bytes, offset: int = 0) -> bool:
         """
@@ -1331,10 +1355,14 @@ class Predictor:
                            and int(self.c_weapon[index, 1]) == int(auth.weapons.ammo[0, slot])
                            and int(self.c_weapon[index, 2]) == int(auth.weapons.reload_end[0])
                            and int(self.c_weapon[index, 3]) == int(auth.alive[0]))
+            same_equip = (int(self.c_equip[index, 0]) & 0xFFFFFFFF == int(auth.ability_ready[0])
+                          and int(self.c_equip[index, 1]) & 0xFFFFFFFF == int(auth.tactical_ready[0])
+                          and int(self.c_equip[index, 2]) & 0xFFFFFFFF == int(auth.stun_until[0])
+                          and int(self.c_equip[index, 3]) == int(auth.equip[0, 0]) * 256 + int(auth.equip[0, 1]))
             self.last_error = error
             self.max_error = max(self.max_error, error)
             diverged = (error > C.RECONCILE_THRESHOLD or float(np.sqrt(np.dot(dv, dv))) > C.RECONCILE_VELOCITY_THRESHOLD
-                        or not same_flags or not same_weapon)
+                        or not same_flags or not same_weapon or not same_equip)
         if not diverged:
             st.spawn_seq[0] = auth.spawn_seq[0]
             return False
@@ -1537,8 +1565,9 @@ class GameClient:
     """
 
     def __init__(self, name: str, weapon_ids, levels, operator, prestige: int = 0, fake_lag_ms: float = 0.0,
-                 fake_jitter_ms: float = 0.0, fake_loss: float = 0.0, seed: int = 99):
+                 fake_jitter_ms: float = 0.0, fake_loss: float = 0.0, seed: int = 99, equipment=None):
         self.name = name[:16]
+        self.equipment = EQ.sanitize(EQ.DEFAULT_EQUIPMENT if equipment is None else equipment)   # requested lethal, tactical
         self.weapon_ids = np.asarray(weapon_ids, dtype=np.int64)
         self.levels = np.asarray(levels, dtype=np.int64)
         self.operator = np.asarray(operator, dtype=np.int64)
@@ -1611,6 +1640,7 @@ class GameClient:
             return
         raw_name = self.name.encode("utf-8")[:16]
         blob = W.encode_loadout(self.weapon_ids, self.levels, self.operator, self.prestige)
+        blob += EQUIP_BLOB.pack(*self.equipment)
         self._request = make_packet(PKT_CONNECT_REQ, 0, CONNECT_REQ.pack(C.PROTOCOL_VERSION, self.nonce, team & 0xFF,
                                                                          len(raw_name)) + raw_name + blob)
         self.state = CONNECTING
@@ -1652,7 +1682,7 @@ class GameClient:
             return
         self._last_send = now
         payload = FRAME_HEADER.pack(0 if self.need_full else self.last_snapshot_tick, self.event_seq, now_ms() or 1,
-                                    self.cmd_tick & 0xFFFFFFFF, int(min(self.ping_ms, 65535)), 0, 0)
+                                    self.cmd_tick & 0xFFFFFFFF, int(min(self.ping_ms, 65535)), 0, 0, *self.equipment)
         try:
             self.sock.sendto(make_packet(PKT_CLIENT_FRAME, self.token, payload), self.server)
             self.stats["keepalives"] = self.stats.get("keepalives", 0) + 1
@@ -1857,17 +1887,17 @@ class GameClient:
         """
         Sample one input command: predict it locally right now, then upload it
         together with the previous ``CMD_REDUNDANCY`` commands and every
-        unacknowledged FIRE record.  Returns ``(fired, ability_used)``.
+        unacknowledged FIRE record.  Returns ``(fired, lethal_used, tactical_used)``.
         """
         if self.state != CONNECTED or self.predictor is None:
-            return False, False
+            return False, False, False
         pred = self.predictor
         self.cmd_tick += 1
         tick = self.cmd_tick
         yaw = float(np.float32(M.wrap_angle(yaw)))          # predict with exactly the bits the server will receive
         pitch = float(np.float32(np.clip(pitch, -C.PITCH_LIMIT, C.PITCH_LIMIT)))
         buttons = int(buttons) & 0xFFFF & ~C.BTN_FIRED
-        fired, ability = pred.predict(tick, buttons, yaw, pitch)
+        fired, lethal, tactical = pred.predict(tick, buttons, yaw, pitch)
         if fired:
             pred.c_buttons[tick % pred.capacity] |= C.BTN_FIRED
             self.shot_seq = (self.shot_seq + 1) & 0xFFFF
@@ -1884,12 +1914,13 @@ class GameClient:
             commands.append((int(pred.c_buttons[i]), float(pred.c_yaw[i]), float(pred.c_pitch[i]),
                              quantize_velocity(pred.c_vel[i])))
         payload = FRAME_HEADER.pack(0 if self.need_full else self.last_snapshot_tick, self.event_seq, now_ms() or 1,
-                                    tick, int(min(self.ping_ms, 65535)), len(commands), len(self.fire_records))
+                                    tick, int(min(self.ping_ms, 65535)), len(commands), len(self.fire_records),
+                                    *self.equipment)
         payload += encode_commands(commands)
         for record in self.fire_records:
             payload += FIRE_RECORD.pack(*record)
         self._send(make_packet(PKT_CLIENT_FRAME, self.token, payload))
-        return fired, ability
+        return fired, lethal, tactical
 
     def sample_entities(self) -> EntityView:
         """Remote entities at ``server_now - 100 ms`` (also fixes the lag-compensation timestamp)."""
