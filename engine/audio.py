@@ -149,6 +149,11 @@ SOUND_RECIPES = {
     "shot_4": lambda: gunshot(0.34, 150.0, 2800.0, 0.08, 0.35, 105),     # P9 Sidekick
     "shot_5": lambda: gunshot(0.50, 78.0, 1800.0, 0.13, 0.65, 106),      # Bulwark LMG
     "shot_6": lambda: rail_shot(),                                           # Aurora Rail
+    "shot_7": lambda: gunshot(0.28, 160.0, 3200.0, 0.06, 0.22, 108),     # VX-3 Viper
+    "shot_8": lambda: gunshot(0.36, 120.0, 2700.0, 0.08, 0.32, 109),     # WR-5 Wraith PDW
+    "shot_9": lambda: gunshot(0.70, 70.0, 2000.0, 0.20, 0.80, 110),      # Verdict revolver
+    "shot_10": lambda: gunshot(0.55, 85.0, 2400.0, 0.15, 0.60, 111),     # KR-11 Kestrel
+    "shot_11": lambda: gunshot(0.65, 68.0, 1600.0, 0.18, 0.88, 112),     # Cyclone Auto-8
     "hit": lambda: click(0.07, 2400.0, 201, 0.9),
     "headshot": lambda: chime((1568.0, 2349.0), 0.16, 0.06),
     "kill": lambda: chime((784.0, 1175.0, 1568.0), 0.20, 0.09),

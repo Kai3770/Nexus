@@ -708,7 +708,9 @@ class LagCompensator:
 # =========================================================================== #
 BOT_NAMES = ("VEXA", "KODO", "RIVET", "NOVA", "ECHO", "SABLE", "PIKE", "ONYX", "FLUX", "TALON", "ZEPH", "MIRA",
              "DRIFT", "QUILL", "EMBER", "LYNX")
-BOT_PRIMARIES = ("vanguard", "hornet", "vanguard", "breacher", "longbow", "hornet", "bulwark")
+BOT_PRIMARIES = ("vanguard", "hornet", "vanguard", "breacher", "longbow", "hornet", "bulwark", "kestrel", "wraith",
+                 "cyclone")
+BOT_SECONDARIES = ("sidekick", "sidekick", "viper", "verdict")
 
 
 @dataclass
@@ -1028,8 +1030,8 @@ class GameServer:
         if bots.size < target:
             index = int(np.flatnonzero(~world.store.active)[0]) if np.any(~world.store.active) else 0
             primary = W.WEAPON_INDEX[BOT_PRIMARIES[self._rng.randrange(len(BOT_PRIMARIES))]]
-            world.add_player("BOT " + BOT_NAMES[index % len(BOT_NAMES)], True,
-                             (primary, W.WEAPON_INDEX["sidekick"]))
+            secondary = W.WEAPON_INDEX[BOT_SECONDARIES[self._rng.randrange(len(BOT_SECONDARIES))]]
+            world.add_player("BOT " + BOT_NAMES[index % len(BOT_NAMES)], True, (primary, secondary))
             self.last_roster = 0.0
         elif bots.size > target:
             teams = world.store.team[bots]

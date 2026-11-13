@@ -10,7 +10,7 @@ from engine import weapons as W
 
 
 def test_weapon_table_is_consistent():
-    assert W.WEAPONS.shape[0] == W.WEAPON_COUNT == len(W.WEAPON_NAMES) == 7
+    assert W.WEAPONS.shape[0] == W.WEAPON_COUNT == len(W.WEAPON_NAMES) == 12
     assert np.all(W.WEAPONS["damage"] > 0) and np.all(W.WEAPONS["interval"] >= 1) and np.all(W.WEAPONS["mag"] > 0)
     assert np.all(W.WEAPONS["range_end"] > W.WEAPONS["range_start"])
     assert W.SPREAD_MATRIX.shape == (7, 6)
@@ -308,3 +308,26 @@ def test_owner_state_round_trip_and_client_spread_agreement():
     server_rays = S.shot_rays(s, [a])
     client_rays = S.shot_rays(mirror, [0], player_ids=[a])
     assert np.allclose(server_rays[1], client_rays[1], atol=1e-6)                       # identical pellet directions
+
+
+def test_weapon_roster_and_unlock_progression():
+    from engine import audio
+    from engine import secure_save as SS
+    assert len(set(W.WEAPON_KEYS)) == len(set(W.WEAPON_NAMES)) == W.WEAPON_COUNT
+    classes = set(int(k) for k in W.WEAPONS["klass"])
+    assert classes == set(range(len(C.WEAPON_CLASSES)))                                     # every class is in use
+    free = [W.WEAPON_KEYS[i] for i in range(W.WEAPON_COUNT) if W.WEAPONS["unlock_cost"][i] <= 0.0]
+    assert len(free) >= 3 and all(W.WEAPON_KEYS[i] in free for i in W.DEFAULT_LOADOUT)
+    order = sorted(range(W.WEAPON_COUNT), key=lambda i: (int(W.WEAPONS["unlock_level"][i]), i))
+    costs = [float(W.WEAPONS["unlock_cost"][i]) for i in order]
+    assert costs == sorted(costs)                                                           # later unlocks cost more
+    assert all(("shot_%d" % i) in audio.SOUND_RECIPES for i in range(W.WEAPON_COUNT))
+    top = W.WEAPON_COUNT - 1                                                                # ids travel as one byte
+    weapon_ids, levels, _, _ = W.decode_loadout(W.encode_loadout([top, top - 2], np.full((2, 8), 3), np.zeros(4), 0))
+    assert weapon_ids.tolist() == [top, top - 2] and levels.max() == 3
+    old_save = {"weapons": {key: {"unlocked": True, "levels": [2] * 8} for key in W.WEAPON_KEYS[:7]},
+                "loadout": ["bulwark", "sidekick"], "level": 12, "credits": 50000.0}
+    profile = SS.Profile.from_dict(old_save)                                                # a profile from 7 weapons
+    assert set(profile.weapons) == set(W.WEAPON_KEYS) and profile.loadout == ["bulwark", "sidekick"]
+    assert all(profile.weapons[key]["unlocked"] and profile.weapons[key]["levels"] == [2] * 8 for key in W.WEAPON_KEYS[:7])
+    assert not any(profile.weapons[key]["unlocked"] for key in W.WEAPON_KEYS[7:])            # new arrivals start locked

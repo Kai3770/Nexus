@@ -91,16 +91,22 @@ motion is frame-rate independent at any refresh rate.
 
 ## Weapon balance
 
-Maximum health is 100 for everybody. Damage per trigger pull scales inversely with rate of fire;
+Twelve weapons; maximum health is 100 for everybody. Damage per trigger pull scales inversely with
+rate of fire;
 recoil is proportional to damage; reload time grows with damage. Time to kill on body hits:
 
 | Weapon | Class | Damage | RPM | Shots | TTK | TTK maxed | Reload |
 | --- | --- | --- | --- | --- | --- | --- | --- |
+| VX-3 VIPER | Pistol (auto) | 14.4 | 1091 | 7 | 333 ms | 300 ms | 1.3 s |
 | HX-4 HORNET | SMG | 17 | 900 | 6 | 333 ms | 300 ms | 1.5 s |
 | P9 SIDEKICK | Pistol | 20 | 720 | 5 | 333 ms | 300 ms | 1.6 s |
+| WR-5 WRAITH PDW | SMG | 20.5 | 655 | 5 | 367 ms | 333 ms | 1.75 s |
 | VK-9 VANGUARD | Assault rifle | 21 | 600 | 5 | 400 ms | 367 ms | 1.9 s |
+| KR-11 KESTREL | Assault rifle | 25.5 | 514 | 4 | 350 ms | 317 ms | 2.2 s |
 | BULWARK LMG | LMG | 28 | 450 | 4 | 400 ms | 367 ms | 2.6 s |
+| VERDICT REVOLVER | Pistol | 34 | 360 | 3 | 333 ms | 300 ms | 2.65 s |
 | LONGBOW DMR | Marksman | 40 | 300 | 3 | 400 ms | 367 ms | 2.7 s |
+| CYCLONE AUTO-8 | Shotgun (auto) | 8 x 7 | 180 | 2 | 333 ms | 300 ms | 2.8 s |
 | BREACHER-12 | Shotgun | 8 x 8.5 | 138 | 2 | 433 ms | 400 ms | 2.9 s |
 | AURORA RAIL | Sniper | 80 | 129 | 2 | 467 ms | 433 ms | 3.1 s |
 
@@ -179,7 +185,7 @@ python -m pytest tests -q
 python tests/run_all.py
 ```
 
-The second command needs no pytest. 98 tests cover the math, the octree against a brute-force
+The second command needs no pytest. 99 tests cover the math, the octree against a brute-force
 reference, movement, weapons and the balance model, the simulation, all arenas and the injector
 (run-time registration, JSON drop-ins, malformed definitions, checksums), navigation on every
 storey, bot-only matches, the save system, wire codecs, rollback, live client / server sessions

@@ -44,7 +44,9 @@ from .menus import MenuManager
 STATE_MENU, STATE_CONNECTING, STATE_PLAYING = range(3)
 LOOK_DEGREES_PER_UNIT = 42.0
 TRACER_COLORS = ((1.0, 0.85, 0.5, 1.0), (1.0, 0.9, 0.55, 1.0), (1.0, 0.7, 0.35, 0.8), (1.0, 0.95, 0.7, 1.0),
-                 (1.0, 0.85, 0.5, 1.0), (1.0, 0.8, 0.45, 1.0), (0.35, 0.9, 1.0, 1.0))
+                 (1.0, 0.85, 0.5, 1.0), (1.0, 0.8, 0.45, 1.0), (0.35, 0.9, 1.0, 1.0), (1.0, 0.9, 0.6, 0.9),
+                 (1.0, 0.88, 0.55, 1.0), (1.0, 0.82, 0.42, 1.0), (1.0, 0.8, 0.45, 1.0), (1.0, 0.7, 0.35, 0.8))
+assert len(TRACER_COLORS) == W.WEAPON_COUNT, "every weapon in config.WEAPON_TABLE needs a tracer colour"
 KEY_LATCH = {"space": C.BTN_JUMP, "left mouse down": C.BTN_SHOOT, "c": C.BTN_SLIDE, "left control": C.BTN_SLIDE,
              "r": C.BTN_RELOAD, "q": C.BTN_SWAP, "g": C.BTN_ABILITY, "scroll up": C.BTN_SWAP, "scroll down": C.BTN_SWAP}
 HELD_BUTTONS = (("w", C.BTN_FORWARD), ("s", C.BTN_BACK), ("a", C.BTN_LEFT), ("d", C.BTN_RIGHT), ("space", C.BTN_JUMP),

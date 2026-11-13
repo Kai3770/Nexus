@@ -261,9 +261,12 @@ class ArmoryScreen(Screen):
         self.selected = W.WEAPON_KEYS[0]
         self.wallet = self.label("", hw - 0.04, 0.43, 1.2, (0.5, 0), COL_GOLD)
         self.weapon_buttons = {}
-        for index, key in enumerate(W.WEAPON_KEYS):
-            self.weapon_buttons[key] = self.button("", -hw + 0.20, 0.33 - index * 0.066, 0.34, 0.056,
-                                                   lambda k=key: self.select(k), text_size=0.75)
+        order = sorted(range(W.WEAPON_COUNT), key=lambda i: (int(W.WEAPONS["unlock_level"][i]), i))
+        step = min(0.066, 0.70 / max(W.WEAPON_COUNT - 1, 1))          # the list always ends above the BACK button
+        for row, index in enumerate(order):
+            key = W.WEAPON_KEYS[index]
+            self.weapon_buttons[key] = self.button("", -hw + 0.20, 0.33 - row * step, 0.34, min(0.056, step * 0.85),
+                                                   lambda k=key: self.select(k), text_size=0.75 if step > 0.06 else 0.7)
         self.panel(0.16, 0.0, 1.02, 0.78)
         left = -0.33
         self.name = self.label("", left, 0.355, 1.5)

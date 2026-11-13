@@ -112,7 +112,7 @@ BROADCAST_ADDRESS = "255.255.255.255"
 BEACON_INTERVAL = 1.0
 BEACON_EXPIRY = 3.5
 PROTOCOL_MAGIC = 0x584E
-PROTOCOL_VERSION = 8
+PROTOCOL_VERSION = 9
 MAX_DATAGRAM = 1200
 RECV_BUFFER = 4096
 CONNECT_RETRY_INTERVAL = 0.25
@@ -296,6 +296,21 @@ WEAPON_TABLE = (
     ("aurora", "AURORA RAIL", 6, False, 80.0, 1, 28.0, 5, 3.1, 28,
      7.0, 0.0, 0.0, 0.0, 0.0, 110.0, 200.0, 0.85, 3.5, 0.92, 4.00, 40000.0, 15, 5.5,
      "Rail rifle. Two to the body, one to the head, at any distance."),
+    ("viper", "VX-3 VIPER", 4, True, 14.4, 1, 3.3, 24, 1.3, 9,
+     2.2, 0.70, 0.30, 2.8, 12.0, 9.0, 22.0, 0.55, 10.0, 1.08, 1.12, 4000.0, 4, 1.4,
+     "Full-auto machine pistol. Seven hits to the body, but they arrive fast."),
+    ("wraith", "WR-5 WRAITH PDW", 1, True, 20.5, 1, 5.5, 40, 1.75, 15,
+     2.3, 0.40, 0.18, 2.0, 10.0, 16.0, 38.0, 0.58, 8.5, 1.04, 1.25, 5500.0, 5, 1.8,
+     "Forty-round PDW. Steadier and longer reaching than the Hornet, a little slower to kill."),
+    ("verdict", "VERDICT REVOLVER", 4, False, 34.0, 1, 10.0, 6, 2.65, 12,
+     2.0, 0.15, 0.90, 2.6, 7.0, 22.0, 45.0, 0.70, 5.0, 1.05, 1.30, 7000.0, 7, 2.0,
+     "Six-shot hand cannon. Three to the body or one to the head."),
+    ("kestrel", "KR-11 KESTREL", 0, True, 25.5, 1, 7.0, 20, 2.2, 20,
+     2.4, 0.18, 0.28, 2.0, 8.0, 34.0, 75.0, 0.68, 6.0, 0.97, 1.50, 9000.0, 8, 2.6,
+     "Battle rifle. Four hits at almost any range; twenty rounds to make them count."),
+    ("cyclone", "CYCLONE AUTO-8", 2, True, 7.0, 8, 20.0, 8, 2.8, 22,
+     4.2, 3.4, 0.0, 0.0, 0.0, 6.0, 14.0, 0.25, 4.5, 0.95, 1.10, 11000.0, 9, 2.8,
+     "Drum-fed automatic shotgun. Hold the trigger: two patterns end it up close."),
 )
 DEFAULT_LOADOUT_KEYS = ("vanguard", "sidekick")
 
