@@ -112,7 +112,7 @@ BROADCAST_ADDRESS = "255.255.255.255"
 BEACON_INTERVAL = 1.0
 BEACON_EXPIRY = 3.5
 PROTOCOL_MAGIC = 0x584E
-PROTOCOL_VERSION = 9
+PROTOCOL_VERSION = 10
 MAX_DATAGRAM = 1200
 RECV_BUFFER = 4096
 CONNECT_RETRY_INTERVAL = 0.25
@@ -311,6 +311,57 @@ WEAPON_TABLE = (
     ("cyclone", "CYCLONE AUTO-8", 2, True, 7.0, 8, 20.0, 8, 2.8, 22,
      4.2, 3.4, 0.0, 0.0, 0.0, 6.0, 14.0, 0.25, 4.5, 0.95, 1.10, 11000.0, 9, 2.8,
      "Drum-fed automatic shotgun. Hold the trigger: two patterns end it up close."),
+    ("midge", "MX-2 MIDGE", 1, True, 14.3, 1, 3.2, 32, 1.25, 8,
+     2.8, 0.75, 0.24, 2.6, 13.0, 8.0, 18.0, 0.50, 10.5, 1.10, 1.12, 1200.0, 2, 0.9,
+     "Micro SMG. The fastest cyclic rate in the armory and the shortest reach."),
+    ("shrike", "TK-7 SHRIKE", 1, True, 16.8, 1, 3.9, 30, 1.4, 13,
+     2.5, 0.50, 0.20, 2.2, 11.0, 11.0, 26.0, 0.55, 9.5, 1.07, 1.20, 2800.0, 3, 1.5,
+     "Compact SMG with a stabilised grip. Hornet pace with a tighter cone."),
+    ("warden", "WD-17 WARDEN", 4, False, 17.3, 1, 4.4, 17, 1.55, 10,
+     1.5, 0.28, 0.40, 2.0, 11.0, 14.0, 32.0, 0.55, 9.5, 1.08, 1.15, 1600.0, 2, 0.9,
+     "Seventeen-round service pistol. Six quick taps from a forgiving cone."),
+    ("axiom", "AX-5 AXIOM", 0, True, 20.2, 1, 5.2, 30, 1.65, 16,
+     2.1, 0.30, 0.20, 1.9, 10.0, 20.0, 45.0, 0.60, 8.0, 1.03, 1.30, 4500.0, 4, 1.6,
+     "Carbine. Handles quicker than a full rifle and gives up a little reach."),
+    ("sparrow", "BP-4 SPARROW", 0, True, 20.8, 1, 5.8, 30, 1.8, 18,
+     2.2, 0.24, 0.21, 1.8, 9.5, 26.0, 55.0, 0.62, 7.5, 1.01, 1.40, 5800.0, 5, 1.9,
+     "Bullpup rifle. A long barrel in a short body; accurate on the move."),
+    ("tempest", "TR-6 TEMPEST", 0, True, 21.4, 1, 6.5, 45, 2.0, 20,
+     2.4, 0.26, 0.24, 2.2, 8.5, 30.0, 62.0, 0.63, 7.0, 0.98, 1.35, 7500.0, 7, 2.2,
+     "Forty-five round rifle. Keeps firing while others reload."),
+    ("heron", "LM-3 HERON", 5, True, 21.7, 1, 6.8, 100, 2.1, 24,
+     3.2, 0.45, 0.18, 2.6, 7.5, 30.0, 65.0, 0.64, 5.5, 0.90, 1.30, 12000.0, 9, 2.9,
+     "Light machine gun with a hundred-round box. Suppression first, speed second."),
+    ("basalt", "BR-14 BASALT", 0, True, 25.0, 1, 6.9, 25, 2.15, 21,
+     2.4, 0.20, 0.27, 2.0, 8.0, 36.0, 80.0, 0.68, 6.0, 0.97, 1.55, 18000.0, 11, 3.4,
+     "Heavy battle rifle. Four hits out to eighty metres."),
+    ("sentry", "DM-7 SENTRY", 3, False, 26.5, 1, 7.5, 20, 2.35, 20,
+     3.0, 0.10, 0.55, 2.2, 7.0, 45.0, 90.0, 0.72, 6.0, 0.97, 1.80, 16000.0, 10, 3.2,
+     "Semi-automatic tactical rifle. Four fast, precise taps at range."),
+    ("mammoth", "MG-6 MAMMOTH", 5, True, 27.5, 1, 7.8, 80, 2.5, 28,
+     3.6, 0.55, 0.22, 3.0, 6.5, 34.0, 72.0, 0.66, 4.8, 0.86, 1.30, 28000.0, 14, 4.0,
+     "Drum-fed heavy machine gun. Brutal, slow to raise and slower to move."),
+    ("anvil", "HP-50 ANVIL", 4, False, 28.5, 1, 9.0, 7, 2.62, 13,
+     2.0, 0.20, 0.85, 2.6, 7.5, 20.0, 42.0, 0.68, 5.5, 1.05, 1.25, 6500.0, 6, 2.1,
+     "Heavy semi-automatic pistol. Four body hits; the recoil earns its name."),
+    ("ranger", "LV-36 RANGER", 3, False, 36.0, 1, 11.0, 8, 2.67, 18,
+     3.0, 0.10, 0.70, 2.4, 6.5, 45.0, 95.0, 0.74, 5.5, 0.98, 1.90, 21000.0, 12, 3.6,
+     "Lever-action rifle. Three body hits or one headshot, cycled fast."),
+    ("osprey", "SC-43 OSPREY", 6, False, 43.0, 1, 13.5, 6, 2.75, 22,
+     5.0, 0.03, 0.0, 0.0, 0.0, 70.0, 150.0, 0.80, 4.5, 0.97, 3.00, 44000.0, 16, 5.6,
+     "Light bolt-action sniper. Three to the body or one to the head, and still mobile."),
+    ("badger", "SL-1 BADGER", 2, False, 52.0, 1, 19.5, 5, 2.78, 22,
+     3.0, 0.40, 0.0, 0.0, 0.0, 18.0, 40.0, 0.55, 5.0, 0.96, 1.25, 9500.0, 8, 2.5,
+     "Slug gun. One heavy round instead of a pattern: two hits at mid range."),
+    ("gavel", "PX-10 GAVEL", 2, False, 6.0, 10, 22.0, 7, 2.85, 22,
+     4.0, 3.2, 0.0, 0.0, 0.0, 7.0, 16.0, 0.28, 5.0, 0.97, 1.15, 24000.0, 13, 3.8,
+     "Pump shotgun with a ten-pellet load. Two patterns at close range."),
+    ("twinfang", "DB-2 TWINFANG", 2, False, 6.0, 12, 27.0, 2, 3.0, 18,
+     4.6, 3.8, 0.0, 0.0, 0.0, 6.0, 13.0, 0.25, 4.5, 1.00, 1.10, 50000.0, 18, 5.8,
+     "Double barrel. Both shells kill at arm's length; then you reload."),
+    ("halberd", "HB-84 HALBERD", 6, False, 84.0, 1, 29.0, 4, 3.4, 32,
+     7.5, 0.0, 0.0, 0.0, 0.0, 130.0, 250.0, 0.88, 3.2, 0.88, 4.50, 60000.0, 20, 6.2,
+     "Anti-materiel rifle. Two hits from anywhere on the map, if you can carry it."),
 )
 DEFAULT_LOADOUT_KEYS = ("vanguard", "sidekick")
 

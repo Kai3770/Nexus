@@ -91,30 +91,49 @@ motion is frame-rate independent at any refresh rate.
 
 ## Weapon balance
 
-Twelve weapons; maximum health is 100 for everybody. Damage per trigger pull scales inversely with
-rate of fire;
-recoil is proportional to damage; reload time grows with damage. Time to kill on body hits:
+29 weapons in seven classes; maximum health is 100 for everybody. Damage per trigger pull scales inversely
+with rate of fire; recoil is proportional to damage; reload time grows with damage. Time to kill on body hits:
 
-| Weapon | Class | Damage | RPM | Shots | TTK | TTK maxed | Reload |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| VX-3 VIPER | Pistol (auto) | 14.4 | 1091 | 7 | 333 ms | 300 ms | 1.3 s |
-| HX-4 HORNET | SMG | 17 | 900 | 6 | 333 ms | 300 ms | 1.5 s |
-| P9 SIDEKICK | Pistol | 20 | 720 | 5 | 333 ms | 300 ms | 1.6 s |
-| WR-5 WRAITH PDW | SMG | 20.5 | 655 | 5 | 367 ms | 333 ms | 1.75 s |
-| VK-9 VANGUARD | Assault rifle | 21 | 600 | 5 | 400 ms | 367 ms | 1.9 s |
-| KR-11 KESTREL | Assault rifle | 25.5 | 514 | 4 | 350 ms | 317 ms | 2.2 s |
-| BULWARK LMG | LMG | 28 | 450 | 4 | 400 ms | 367 ms | 2.6 s |
-| VERDICT REVOLVER | Pistol | 34 | 360 | 3 | 333 ms | 300 ms | 2.65 s |
-| LONGBOW DMR | Marksman | 40 | 300 | 3 | 400 ms | 367 ms | 2.7 s |
-| CYCLONE AUTO-8 | Shotgun (auto) | 8 x 7 | 180 | 2 | 333 ms | 300 ms | 2.8 s |
-| BREACHER-12 | Shotgun | 8 x 8.5 | 138 | 2 | 433 ms | 400 ms | 2.9 s |
-| AURORA RAIL | Sniper | 80 | 129 | 2 | 467 ms | 433 ms | 3.1 s |
+| Weapon | Class | Damage | RPM | Shots | TTK | TTK maxed | Reload | Unlock |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| MX-2 MIDGE | SMG (auto) | 14.3 | 1125 | 7 | 333 ms | 300 ms | 1.25 s | L2 |
+| VX-3 VIPER | Pistol (auto) | 14.4 | 1091 | 7 | 333 ms | 300 ms | 1.3 s | L4 |
+| TK-7 SHRIKE | SMG (auto) | 16.8 | 923 | 6 | 333 ms | 300 ms | 1.4 s | L3 |
+| HX-4 HORNET | SMG (auto) | 17 | 900 | 6 | 333 ms | 300 ms | 1.5 s | L1 |
+| WD-17 WARDEN | Pistol (semi) | 17.3 | 818 | 6 | 367 ms | 333 ms | 1.55 s | L2 |
+| P9 SIDEKICK | Pistol (semi) | 20 | 720 | 5 | 333 ms | 300 ms | 1.6 s | L1 |
+| AX-5 AXIOM | Assault rifle (auto) | 20.2 | 692 | 5 | 350 ms | 317 ms | 1.65 s | L4 |
+| WR-5 WRAITH PDW | SMG (auto) | 20.5 | 655 | 5 | 367 ms | 333 ms | 1.75 s | L5 |
+| BP-4 SPARROW | Assault rifle (auto) | 20.8 | 621 | 5 | 400 ms | 350 ms | 1.8 s | L5 |
+| VK-9 VANGUARD | Assault rifle (auto) | 21 | 600 | 5 | 400 ms | 367 ms | 1.9 s | L1 |
+| TR-6 TEMPEST | Assault rifle (auto) | 21.4 | 554 | 5 | 433 ms | 400 ms | 2 s | L7 |
+| LM-3 HERON | LMG (auto) | 21.7 | 529 | 5 | 467 ms | 417 ms | 2.1 s | L9 |
+| BR-14 BASALT | Assault rifle (auto) | 25 | 522 | 4 | 350 ms | 317 ms | 2.15 s | L11 |
+| KR-11 KESTREL | Assault rifle (auto) | 25.5 | 514 | 4 | 350 ms | 317 ms | 2.2 s | L8 |
+| DM-7 SENTRY | Marksman (semi) | 26.5 | 480 | 4 | 383 ms | 350 ms | 2.35 s | L10 |
+| MG-6 MAMMOTH | LMG (auto) | 27.5 | 462 | 4 | 400 ms | 367 ms | 2.5 s | L14 |
+| BULWARK LMG | LMG (auto) | 28 | 450 | 4 | 400 ms | 367 ms | 2.6 s | L10 |
+| HP-50 ANVIL | Pistol (semi) | 28.5 | 400 | 4 | 450 ms | 417 ms | 2.62 s | L6 |
+| VERDICT REVOLVER | Pistol (semi) | 34 | 360 | 3 | 333 ms | 300 ms | 2.65 s | L7 |
+| LV-36 RANGER | Marksman (semi) | 36 | 327 | 3 | 367 ms | 333 ms | 2.67 s | L12 |
+| LONGBOW DMR | Marksman (semi) | 40 | 300 | 3 | 400 ms | 367 ms | 2.7 s | L6 |
+| SC-43 OSPREY | Sniper (semi) | 43 | 267 | 3 | 450 ms | 417 ms | 2.75 s | L16 |
+| SL-1 BADGER | Shotgun (semi) | 52 | 185 | 2 | 333 ms | 300 ms | 2.78 s | L8 |
+| CYCLONE AUTO-8 | Shotgun (auto) | 8 x 7 | 180 | 2 | 333 ms | 300 ms | 2.8 s | L9 |
+| PX-10 GAVEL | Shotgun (semi) | 10 x 6 | 164 | 2 | 367 ms | 333 ms | 2.85 s | L13 |
+| BREACHER-12 | Shotgun (semi) | 8 x 8.5 | 138 | 2 | 433 ms | 400 ms | 2.9 s | L3 |
+| DB-2 TWINFANG | Shotgun (semi) | 12 x 6 | 133 | 2 | 450 ms | 417 ms | 3 s | L18 |
+| AURORA RAIL | Sniper (semi) | 80 | 129 | 2 | 467 ms | 433 ms | 3.1 s | L15 |
+| HB-84 HALBERD | Sniper (semi) | 84 | 124 | 2 | 483 ms | 450 ms | 3.4 s | L20 |
 
 `weapons.validate_balance()` checks the 300 to 500 ms band for stock weapons and for every
 combination of damage and fire-rate upgrades, and the test-suite measures the same numbers in
-the real simulation. Headshots keep the 3.0x multiplier of the original brief and are therefore
-faster than the band (set the head entry of `ZONE_MULTIPLIER` in `engine/config.py` to about 1.3 if they should
-stay inside it).
+the real simulation. To add a weapon, add a row to `WEAPON_TABLE` in `engine/config.py` and run
+`python -c "from engine import weapons; print(weapons.validate_balance())"`: an empty list means it fits the
+model. Its shot sound, tracer colour, first-person model (from `WEAPON_LOOKS` in `engine/renderer.py`, or a
+class default), armory page and bot use follow automatically. Headshots keep the 3.0x multiplier of the
+original brief and are therefore faster than the band (set the head entry of `ZONE_MULTIPLIER` in
+`engine/config.py` to about 1.3 if they should stay inside it).
 
 ## Audio
 

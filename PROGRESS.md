@@ -8,8 +8,8 @@ gespeicherte Fortschritt; `README.md` beschreibt das Spiel selbst.
 | Bereich | Stand |
 | --- | --- |
 | `engine/config.py` | Neu: Waffen-/Upgrade-Tabellen, TTK-Band, Audio-Decken, Grafik-Presets, Frame-Pacing |
-| Waffen | 12 Waffen, davon 5 neu (VX-3 VIPER, WR-5 WRAITH PDW, VERDICT REVOLVER, KR-11 KESTREL, CYCLONE AUTO-8) mit Modell, Sound, Tracer und Bot-Nutzung |
-| Waffenbalance | TTK 333 bis 467 ms (Körpertreffer, 100 HP), maximal aufgerüstet 300 bis 433 ms; `weapons.validate_balance()` leer |
+| Waffen | 29 Waffen in 7 Klassen (17 im letzten Schritt neu), alle im Balance-Modell; Sound, Tracer und Ego-Modell entstehen aus den Werten bzw. aus `WEAPON_LOOKS`; Armory nach Klassen geblättert; Bots nutzen das ganze Arsenal |
+| Waffenbalance | TTK 333 bis 483 ms (Körpertreffer, 100 HP), maximal aufgerüstet 300 bis 450 ms; `weapons.validate_balance()` leer |
 | Audio | Master-Clamp 0..1, Kategorie-Decken (Waffe 0.25, Treffer 0.20, Explosion 0.30), Abfall 1/d² |
 | Karten | `content/maps_registry.py` (5 Arenen als Tupel-Daten), `engine/maps.py` als Injektor, JSON-Drop-in, Laufzeit-Registrierung, CRC im Handshake |
 | Renderer | `engine/renderer.py` neu: Material-Texturarrays, Normal-Mapping, Sonnenschatten (statisch + dynamisch), gebackene Lampen + AO, Himmelspanorama, 3D-Skyline, Bloom, gebündelte Pools und HUD |

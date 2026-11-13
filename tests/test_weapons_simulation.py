@@ -10,7 +10,7 @@ from engine import weapons as W
 
 
 def test_weapon_table_is_consistent():
-    assert W.WEAPONS.shape[0] == W.WEAPON_COUNT == len(W.WEAPON_NAMES) == 12
+    assert W.WEAPONS.shape[0] == W.WEAPON_COUNT == len(W.WEAPON_NAMES) == 29
     assert np.all(W.WEAPONS["damage"] > 0) and np.all(W.WEAPONS["interval"] >= 1) and np.all(W.WEAPONS["mag"] > 0)
     assert np.all(W.WEAPONS["range_end"] > W.WEAPONS["range_start"])
     assert W.SPREAD_MATRIX.shape == (7, 6)
@@ -331,3 +331,8 @@ def test_weapon_roster_and_unlock_progression():
     assert set(profile.weapons) == set(W.WEAPON_KEYS) and profile.loadout == ["bulwark", "sidekick"]
     assert all(profile.weapons[key]["unlocked"] and profile.weapons[key]["levels"] == [2] * 8 for key in W.WEAPON_KEYS[:7])
     assert not any(profile.weapons[key]["unlocked"] for key in W.WEAPON_KEYS[7:])            # new arrivals start locked
+    from engine import network_lan as N
+    assert not {name.split()[-1] for name in W.WEAPON_NAMES} & set(N.BOT_NAMES)              # kill feed stays readable
+    assert set(N.BOT_PRIMARIES) | set(N.BOT_SECONDARIES) == set(W.WEAPON_KEYS)               # bots use the whole arsenal
+    per_class = [sum(1 for k in W.WEAPONS["klass"] if int(k) == c) for c in range(len(C.WEAPON_CLASSES))]
+    assert max(per_class) <= 8                                                               # one armory page per class

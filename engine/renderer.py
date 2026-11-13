@@ -1644,12 +1644,16 @@ _GLOVE = (0.13, 0.13, 0.14)
 _DOT = (1.00, 0.25, 0.20)
 _RAIL = (0.30, 0.90, 1.00)
 _AMBER = (1.00, 0.62, 0.18)
+_GREEN = (0.35, 1.00, 0.45)
+_OLIVE = (0.34, 0.37, 0.28)
+_WOOD = (0.46, 0.28, 0.15)
 # view-model surface id -> (texture layer, emissive, texture repeats per metre)
 _VM_SURFACE = {0: (maps.LAYER["armor"], 0.0, 5.0), 1: (maps.LAYER["metal"], 0.0, 3.0),
                2: (maps.LAYER["armor"], 0.0, 9.0), 3: (maps.LAYER["glow"], 1.0, 8.0)}
 
 # Per weapon: list of (centre, size, colour, surface) boxes in gun space (x right, y up, z forward, metres).
-WEAPON_MODELS = (
+# The first twelve weapons are built by hand; every later one is assembled from WEAPON_LOOKS below.
+_HAND_BUILT_MODELS = (
     {"muzzle": 0.61, "sight": 0.096, "support": 0.30, "parts": (            # VK-9 Vanguard
         ((0, 0.020, 0.10), (0.050, 0.080, 0.36), _GUN, 1), ((0, 0.030, 0.36), (0.046, 0.056, 0.20), _POLY, 0),
         ((0, 0.036, 0.53), (0.022, 0.022, 0.16), _STEEL, 1), ((0, 0.005, -0.19), (0.040, 0.070, 0.22), _POLY, 0),
@@ -1714,6 +1718,162 @@ WEAPON_MODELS = (
         ((0, 0.004, -0.20), (0.044, 0.076, 0.22), _POLY, 0), ((0, -0.070, -0.050), (0.034, 0.090, 0.040), _GUN, 0),
         ((0, 0.060, 0.05), (0.014, 0.012, 0.10), _GUN, 1), ((0, 0.066, 0.58), (0.008, 0.016, 0.012), _DOT, 3))},
 )
+
+
+def assemble_weapon(kind: str = "long", body: float = 0.32, guard: float = 0.18, barrel: float = 0.14, mag=("box", 0.12),
+                    stock: str = "full", optic: str = "iron", finish=_GUN, furniture=_POLY, accent=_DOT,
+                    foregrip: bool = False, bipod: bool = False, double: bool = False, brake: bool = False,
+                    bolt: bool = False, lever: bool = False, bulk: float = 1.0) -> dict:
+    """
+    Build a first-person weapon (same format as the hand-built models) from a short description.
+
+    ``kind`` is ``"pistol"`` or ``"long"`` (rifles, SMGs, machine guns, shotguns, sniper rifles).  Lengths are
+    metres: ``body`` is the receiver (or pistol slide), ``guard`` the handguard and ``barrel`` the exposed barrel.
+    ``mag`` is ``None``, ``("box", height)``, ``("drum", size)``, ``("belt", size)``, ``("tube",)`` or
+    ``("extended",)`` (pistols); ``stock`` is ``"full"``, ``"folding"``, ``"bullpup"`` or ``"none"``; ``optic`` is
+    ``"iron"``, ``"dot"``, ``"scope"`` or ``"big_scope"``.
+    """
+    parts = []
+
+    def add(centre, size, colour, surface):
+        parts.append((tuple(float(v) for v in centre), tuple(float(v) for v in size), tuple(colour), int(surface)))
+
+    if kind == "pistol":
+        z0, z1 = -0.05, -0.05 + body
+        top = 0.030 + 0.020 * bulk
+        add((0, 0.030, (z0 + z1) * 0.5), (0.036 * bulk, 0.040 * bulk, body), finish, 1)                     # slide
+        add((0, 0.000, z0 + body * 0.40), (0.034 * bulk, 0.028 * bulk, body * 0.75), _GUN, 1)              # frame
+        add((0, -0.060, -0.035), (0.034 * bulk, 0.100, 0.046), furniture, 0)                                # grip
+        if mag and mag[0] == "extended":
+            add((0, -0.125, -0.030), (0.030, 0.050, 0.040), _STEEL, 1)
+        muzzle = z1
+        if brake:
+            add((0, 0.030, z1 + 0.03), (0.030 * bulk, 0.032 * bulk, 0.06), _STEEL, 1)                         # compensator
+            muzzle += 0.06
+        add((0, top + 0.004, -0.030), (0.010, 0.010, 0.010), accent, 3)                                      # rear dot
+        add((0, top + 0.004, z1 - 0.02), (0.006, 0.012, 0.008), _STEEL, 1)                                   # front post
+        return {"muzzle": muzzle + 0.01, "sight": top + 0.014, "support": 0.02, "parts": tuple(parts)}
+
+    r0 = -0.20 if stock == "bullpup" else -0.07
+    r1 = r0 + body
+    top = 0.018 + 0.042 * bulk                                                                               # receiver top
+    add((0, 0.018, (r0 + r1) * 0.5), (0.052 * bulk, 0.084 * bulk, body), finish, 1)                         # receiver
+    g0, g1 = r1, r1 + guard
+    b1 = g1 + barrel
+    barrel_top = 0.032 + 0.011 * bulk
+    if double:
+        for side in (-1.0, 1.0):
+            add((0.0135 * side * bulk, 0.034, (g0 + b1) * 0.5), (0.026 * bulk, 0.026 * bulk, b1 - g0), _STEEL, 1)
+        add((0, 0.004, g0 + guard * 0.5), (0.050 * bulk, 0.034 * bulk, guard), furniture, 0)                  # forend
+        barrel_top = 0.034 + 0.013 * bulk
+    else:
+        add((0, 0.026, (g0 + g1) * 0.5), (0.046 * bulk, 0.054 * bulk, guard), furniture, 0)                   # handguard
+        add((0, 0.032, (g1 - 0.02 + b1) * 0.5), (0.022 * bulk, 0.022 * bulk, b1 - g1 + 0.02), _STEEL, 1)     # barrel
+    muzzle = b1
+    if brake:
+        add((0, 0.032, b1 + 0.025), (0.036 * bulk, 0.036 * bulk, 0.05), _GUN, 1)                             # muzzle brake
+        muzzle += 0.05
+    if stock == "full":
+        add((0, 0.004, r0 - 0.12), (0.042 * bulk, 0.076 * bulk, 0.24), furniture, 0)
+    elif stock == "folding":
+        add((0, 0.010, r0 - 0.08), (0.024, 0.046, 0.16), _STEEL, 1)
+    elif stock == "bullpup":
+        add((0, 0.006, r0 - 0.02), (0.050 * bulk, 0.084 * bulk, 0.04), furniture, 0)                         # butt pad
+    add((0, -0.068, -0.045), (0.034, 0.088, 0.040), _GUN, 0)                                                 # grip
+    if mag:
+        if mag[0] == "box":
+            height = float(mag[1])
+            add((0, -0.028 - height * 0.5, -0.14 if stock == "bullpup" else 0.08), (0.032 * bulk, height, 0.056),
+                _STEEL, 1)
+        elif mag[0] == "drum":
+            size = float(mag[1])
+            add((0, -0.035 - size * 0.5, 0.10), (size, size, 0.09), _STEEL, 1)
+        elif mag[0] == "belt":
+            size = float(mag[1])
+            add((-0.012, -0.030 - size * 0.5, 0.12), (size, size, size * 1.2), furniture, 0)
+        elif mag[0] == "tube":
+            add((0, 0.004, (g0 + b1 - 0.04) * 0.5), (0.026 * bulk, 0.026 * bulk, b1 - g0 - 0.04), _GUN, 1)
+    support = g0 + guard * 0.5 - 0.03
+    if foregrip:
+        add((0, -0.066, g0 + guard * 0.55), (0.026, 0.078, 0.030), furniture, 0)
+        support = g0 + guard * 0.55 - 0.03
+    if bipod:
+        for side in (-1.0, 1.0):
+            add((0.022 * side, -0.035, g1 + 0.03), (0.008, 0.10, 0.008), _STEEL, 1)
+    if bolt:
+        add((0.034 * bulk, 0.030, r0 + 0.07), (0.030, 0.012, 0.012), _STEEL, 1)
+    if lever:
+        add((0, -0.062, -0.005), (0.012, 0.030, 0.090), _STEEL, 1)
+    if optic == "dot":
+        housing = top + 0.016
+        add((0, housing, 0.05), (0.020, 0.028, 0.060), _GUN, 1)
+        add((0, housing + 0.004, 0.018), (0.007, 0.007, 0.004), accent, 3)
+        sight = housing + 0.018
+    elif optic in ("scope", "big_scope"):
+        big = optic == "big_scope"
+        axis = top + (0.032 if big else 0.026)
+        length, width = (0.28, 0.040) if big else (0.20, 0.030)
+        centre = 0.10 if big else 0.08
+        add((0, axis, centre), (width, width + 0.004, length), _GUN, 1)                                       # tube
+        for z in (centre - length * 0.3, centre + length * 0.3):
+            add((0, top + 0.006, z), (0.012, axis - top, 0.014), _STEEL, 1)                                   # rings
+        eye = 0.024 if big else 0.016
+        add((0, axis, centre - length * 0.5 - 0.002), (eye, eye, 0.004), accent, 3)                         # eyepiece glow
+        sight = axis + (0.030 if big else 0.026)
+    else:                                                                                                     # iron sights
+        line = top + 0.010
+        add((0, top + 0.005, r0 + 0.05), (0.016, 0.010, 0.010), _STEEL, 1)                                    # rear notch
+        add((0, (barrel_top + line) * 0.5, muzzle - 0.03), (0.006, line - barrel_top + 0.004, 0.010), _STEEL, 1)
+        add((0, line, muzzle - 0.03), (0.008, 0.008, 0.010), accent, 3)                                       # bead
+        sight = line + 0.008
+    return {"muzzle": muzzle + 0.01, "sight": sight, "support": support, "parts": tuple(parts)}
+
+
+# Short descriptions of every weapon after the hand-built twelve (keyed by weapon key).
+WEAPON_LOOKS = {
+    "midge": dict(body=0.20, guard=0.06, barrel=0.07, mag=("box", 0.16), stock="folding", optic="dot", bulk=0.9),
+    "shrike": dict(body=0.24, guard=0.12, barrel=0.08, mag=("box", 0.12), stock="folding", optic="dot", accent=_RAIL,
+                   foregrip=True, bulk=0.95),
+    "warden": dict(kind="pistol", body=0.22, mag=("extended",), finish=_STEEL, furniture=_GUN, accent=_GREEN),
+    "axiom": dict(body=0.30, guard=0.15, barrel=0.10, mag=("box", 0.12), stock="folding", optic="dot", accent=_AMBER,
+                  furniture=_GUN),
+    "sparrow": dict(body=0.38, guard=0.14, barrel=0.14, mag=("box", 0.11), stock="bullpup", optic="dot", accent=_RAIL,
+                    finish=_OLIVE),
+    "tempest": dict(body=0.34, guard=0.20, barrel=0.14, mag=("box", 0.17), optic="dot", accent=_GREEN, furniture=_GUN,
+                    foregrip=True),
+    "heron": dict(body=0.38, guard=0.20, barrel=0.20, mag=("belt", 0.10), optic="iron", bipod=True, bulk=1.1,
+                  furniture=_OLIVE),
+    "basalt": dict(body=0.40, guard=0.22, barrel=0.18, mag=("box", 0.12), optic="scope", accent=_AMBER, brake=True,
+                   bulk=1.05),
+    "sentry": dict(body=0.38, guard=0.24, barrel=0.24, mag=("box", 0.09), optic="scope", accent=_RAIL, finish=_OLIVE),
+    "mammoth": dict(body=0.42, guard=0.20, barrel=0.24, mag=("drum", 0.13), optic="iron", bipod=True, brake=True,
+                    bulk=1.2, furniture=_GUN),
+    "anvil": dict(kind="pistol", body=0.27, bulk=1.25, brake=True, finish=_STEEL),
+    "ranger": dict(body=0.26, guard=0.22, barrel=0.22, mag=("tube",), optic="iron", lever=True, finish=_STEEL,
+                   furniture=_WOOD, accent=_AMBER),
+    "osprey": dict(body=0.34, guard=0.24, barrel=0.26, mag=("box", 0.07), optic="scope", bolt=True, accent=_RAIL,
+                   furniture=_OLIVE),
+    "badger": dict(body=0.30, guard=0.20, barrel=0.18, mag=("tube",), optic="iron", furniture=_GUN, accent=_AMBER,
+                   bulk=1.1),
+    "gavel": dict(body=0.28, guard=0.22, barrel=0.16, mag=("tube",), optic="iron", furniture=_WOOD, bulk=1.1),
+    "twinfang": dict(body=0.20, guard=0.24, barrel=0.22, mag=None, optic="iron", double=True, finish=_STEEL,
+                     furniture=_WOOD, accent=_AMBER),
+    "halberd": dict(body=0.46, guard=0.26, barrel=0.30, mag=("box", 0.10), optic="big_scope", brake=True, bipod=True,
+                    bolt=True, bulk=1.25, accent=_RAIL),
+}
+# Fallback for weapons that have no entry above, by class (assault rifle, SMG, shotgun, marksman, pistol, LMG, sniper).
+CLASS_LOOKS = (
+    dict(body=0.34, guard=0.18, barrel=0.14, mag=("box", 0.12), optic="dot"),
+    dict(body=0.26, guard=0.10, barrel=0.08, mag=("box", 0.13), stock="folding", optic="dot"),
+    dict(body=0.28, guard=0.22, barrel=0.16, mag=("tube",), optic="iron", bulk=1.1),
+    dict(body=0.38, guard=0.24, barrel=0.22, mag=("box", 0.09), optic="scope"),
+    dict(kind="pistol", body=0.22),
+    dict(body=0.40, guard=0.20, barrel=0.22, mag=("belt", 0.10), optic="iron", bipod=True, bulk=1.15),
+    dict(body=0.40, guard=0.26, barrel=0.28, mag=("box", 0.08), optic="big_scope", bolt=True),
+)
+WEAPON_MODELS = _HAND_BUILT_MODELS + tuple(
+    assemble_weapon(**WEAPON_LOOKS.get(W.WEAPON_KEYS[i], CLASS_LOOKS[int(W.WEAPONS["klass"][i]) % len(CLASS_LOOKS)]))
+    for i in range(len(_HAND_BUILT_MODELS), W.WEAPON_COUNT))
 VM_HIP = np.array([0.150, -0.150, 0.40])
 assert len(WEAPON_MODELS) == W.WEAPON_COUNT, "every weapon in config.WEAPON_TABLE needs a view-model"
 

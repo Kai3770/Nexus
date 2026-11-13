@@ -708,9 +708,9 @@ class LagCompensator:
 # =========================================================================== #
 BOT_NAMES = ("VEXA", "KODO", "RIVET", "NOVA", "ECHO", "SABLE", "PIKE", "ONYX", "FLUX", "TALON", "ZEPH", "MIRA",
              "DRIFT", "QUILL", "EMBER", "LYNX")
-BOT_PRIMARIES = ("vanguard", "hornet", "vanguard", "breacher", "longbow", "hornet", "bulwark", "kestrel", "wraith",
-                 "cyclone")
-BOT_SECONDARIES = ("sidekick", "sidekick", "viper", "verdict")
+_PISTOL_CLASS = C.WEAPON_CLASSES.index("PISTOL")
+BOT_PRIMARIES = tuple(key for i, key in enumerate(W.WEAPON_KEYS) if int(W.WEAPONS["klass"][i]) != _PISTOL_CLASS)
+BOT_SECONDARIES = tuple(key for i, key in enumerate(W.WEAPON_KEYS) if int(W.WEAPONS["klass"][i]) == _PISTOL_CLASS)
 
 
 @dataclass

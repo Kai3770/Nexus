@@ -260,13 +260,20 @@ class ArmoryScreen(Screen):
         hw = self.half_width
         self.selected = W.WEAPON_KEYS[0]
         self.wallet = self.label("", hw - 0.04, 0.43, 1.2, (0.5, 0), COL_GOLD)
-        self.weapon_buttons = {}
-        order = sorted(range(W.WEAPON_COUNT), key=lambda i: (int(W.WEAPONS["unlock_level"][i]), i))
-        step = min(0.066, 0.70 / max(W.WEAPON_COUNT - 1, 1))          # the list always ends above the BACK button
-        for row, index in enumerate(order):
-            key = W.WEAPON_KEYS[index]
-            self.weapon_buttons[key] = self.button("", -hw + 0.20, 0.33 - row * step, 0.34, min(0.056, step * 0.85),
-                                                   lambda k=key: self.select(k), text_size=0.75 if step > 0.06 else 0.7)
+        # weapons are browsed one class at a time, each class ordered by unlock level
+        self.classes = [k for k in range(len(W.CLASS_NAMES)) if any(int(c) == k for c in W.WEAPONS["klass"])]
+        self.by_class = {k: sorted((i for i in range(W.WEAPON_COUNT) if int(W.WEAPONS["klass"][i]) == k),
+                                   key=lambda i: (int(W.WEAPONS["unlock_level"][i]), i)) for k in self.classes}
+        self.class_index = 0
+        rows = max(len(members) for members in self.by_class.values())
+        step = min(0.066, 0.66 / max(rows, 1))                        # the list always ends above the BACK button
+        self.label("WEAPON CLASS", -hw + 0.20, 0.395, 0.7, (0, 0), COL_DIM)
+        self.button("-", -hw + 0.055, 0.345, 0.05, 0.05, lambda: self.cycle_class(-1))
+        self.class_label = self.label("", -hw + 0.20, 0.345, 0.85, (0, 0), COL_ACCENT)
+        self.button("+", -hw + 0.345, 0.345, 0.05, 0.05, lambda: self.cycle_class(1))
+        self.row_buttons = [self.button("", -hw + 0.20, 0.27 - row * step, 0.34, min(0.056, step * 0.85),
+                                        lambda r=row: self.select_row(r), text_size=0.75) for row in range(rows)]
+        self.row_keys = [None] * rows
         self.panel(0.16, 0.0, 1.02, 0.78)
         left = -0.33
         self.name = self.label("", left, 0.355, 1.5)
@@ -295,7 +302,20 @@ class ArmoryScreen(Screen):
         self.back_button()
 
     def select(self, key: str) -> None:
+        """Show ``key`` (switching to its class)."""
         self.selected = key
+        self.class_index = self.classes.index(int(W.WEAPONS["klass"][W.WEAPON_INDEX[key]]))
+        self.refresh()
+
+    def select_row(self, row: int) -> None:
+        if self.row_keys[row] is not None:
+            self.select(self.row_keys[row])
+
+    def cycle_class(self, direction: int) -> None:
+        self.class_index = (self.class_index + direction) % len(self.classes)
+        members = self.by_class[self.classes[self.class_index]]
+        if W.WEAPON_INDEX[self.selected] not in members:
+            self.selected = W.WEAPON_KEYS[members[0]]
         self.refresh()
 
     def act(self, which: int) -> None:
@@ -324,8 +344,17 @@ class ArmoryScreen(Screen):
         profile = self.pm.profile
         credits = profile.credits
         self.set_text(self.wallet, "%s    LEVEL %d" % (money(credits), profile.level))
-        for key, button in self.weapon_buttons.items():
-            index = W.WEAPON_INDEX[key]
+        klass = self.classes[self.class_index]
+        members = self.by_class[klass]
+        owned = sum(1 for index in members if profile.weapons[W.WEAPON_KEYS[index]]["unlocked"])
+        self.set_text(self.class_label, "%s   %d / %d" % (W.CLASS_NAMES[klass], owned, len(members)))
+        for row, button in enumerate(self.row_buttons):
+            if row >= len(members):
+                self.row_keys[row] = None
+                button.enabled = False
+                continue
+            index = members[row]
+            key = W.WEAPON_KEYS[index]
             entry = profile.weapons[key]
             if key in profile.loadout:
                 tag = "PRIMARY" if profile.loadout[0] == key else "SECONDARY"
@@ -333,6 +362,8 @@ class ArmoryScreen(Screen):
                 tag = "OWNED"
             else:
                 tag = "LOCKED  L%d" % int(W.WEAPONS["unlock_level"][index])
+            self.row_keys[row] = key
+            button.enabled = True
             self.set_text(button, "%s   [%s]" % (W.WEAPON_NAMES[index], tag))
             self.tint(button, (0.10, 0.30, 0.40) if key == self.selected else COL_BUTTON)
         key = self.selected

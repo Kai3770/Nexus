@@ -177,6 +177,27 @@ SOUND_RECIPES = {
 }
 
 
+# Character of a class: (crack frequency Hz, tail length scale).
+_CLASS_VOICE = {0: (2400.0, 1.0), 1: (3000.0, 0.8), 2: (1500.0, 1.2), 3: (2600.0, 1.1), 4: (2900.0, 0.8),
+                5: (1900.0, 1.1), 6: (3300.0, 1.4)}
+
+
+def weapon_shot(index: int) -> np.ndarray:
+    """
+    Gunshot derived from a weapon's statistics: harder hitting rounds ring
+    longer, sit lower and carry more body; the class sets the crack.
+    """
+    burst = float(W.WEAPONS["damage"][index]) * int(W.WEAPONS["pellets"][index])
+    crack, tail_scale = _CLASS_VOICE.get(int(W.WEAPONS["klass"][index]), (2400.0, 1.0))
+    duration = float(np.clip(0.24 + 0.0062 * burst, 0.25, 0.95))
+    body = float(np.clip(172.0 - 1.45 * burst, 48.0, 170.0))
+    tail = float(np.clip((0.05 + 0.0022 * burst) * tail_scale, 0.05, 0.30))
+    weight = float(np.clip(0.18 + 0.0088 * burst, 0.2, 0.95))
+    return gunshot(duration, body, crack, tail, weight, 300 + index)
+
+
+for _index in range(W.WEAPON_COUNT):
+    SOUND_RECIPES.setdefault("shot_%d" % _index, lambda i=_index: weapon_shot(i))
 assert all(("shot_%d" % index) in SOUND_RECIPES for index in range(W.WEAPON_COUNT))
 
 
