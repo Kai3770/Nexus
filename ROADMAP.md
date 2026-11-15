@@ -1,6 +1,6 @@
 # NEXUS-3D-EXTREME – Roadmap
 
-Stand: 15.11.2026, nach Sprint 2. Geplant aus einer Code-Analyse (Knowledge-Graph mit graphify:
+Stand: 15.11.2026, nach Sprint 3. Geplant aus einer Code-Analyse (Knowledge-Graph mit graphify:
 1472 Knoten, 3349 Kanten, 81 Module-Gruppen, keine Import-Zyklen) und Bot-Messungen.
 
 ## Bestandsaufnahme
@@ -11,7 +11,8 @@ prozedurale Grafik und Sounds; Wirtschaft mit Sponsoren und Prestige; Bots in dr
 120 automatische Tests.
 
 **Lücken aus Spielersicht:**
-- Kein Killcam, schlichtes Match-Ende ohne Auswertung (Scorestreaks, Minimap und Death-Recap kamen in Sprint 2).
+- Kein Killcam und kein Zuschauermodus; nur LAN (Scorestreaks, Minimap und Death-Recap kamen in Sprint 2,
+  UPLINK, Match-Report, Medaillen und Aufträge in Sprint 3).
 - Keine frei belegbaren Tasten, kein Controller.
 - Nur LAN, kein Spiel übers Internet.
 
@@ -48,13 +49,14 @@ nie auseinanderlaufen. Balance-Prüfungen (`validate_balance`, `validate_equipme
 | Death-Recap | Waffe, Entfernung, Trefferbilanz in beide Richtungen, Restleben des Gegners, Schaden von anderen |
 | Tests | 13 neue Tests (140 insgesamt), gerenderte Szenen für Markierung, Einschlag, Schild und Recap geprüft |
 
-## Sprint 3 – „Matchgefühl“
+## Sprint 3 – „Matchgefühl“ – erledigt
 
-| Thema | Aufwand |
+| Thema | Ergebnis |
 | --- | --- |
-| Auswertung am Match-Ende: MVP, Trefferquote, beste Serie, verdiente Credits/XP, Medaillen | S–M |
-| Modus UPLINK: drei Zonen pro Arena halten, Punkte pro Sekunde, Bots spielen auf Ziele | M–L |
-| Aufträge: tägliche und wöchentliche Herausforderungen mit Credits | M |
+| Modus UPLINK | Drei Zonen pro Arena, automatisch und fair aus den Kartendaten abgeleitet; Erobern, Neutralisieren, Umkämpft, Punkte pro gehaltener Zone; Bots spielen auf Ziele (Bot-Matches enden nach 2,5 bis 4 Minuten, ausgeglichen über 12 Testläufe) |
+| Match-Report und Medaillen | 12 Medaillen mit Popups, Report mit MVP und persönlicher Bilanz neben dem Scoreboard |
+| Aufträge | 3 tägliche und 1 wöchentlicher Auftrag nach UTC-Datum, Auszahlung sofort, im signierten Spielstand |
+| Tests | 18 neue Tests (158 insgesamt), gerenderte Szenen für Erobern, Medaillen, Report und Menüs geprüft |
 
 ## Sprint 4 – Technik und Hosting
 

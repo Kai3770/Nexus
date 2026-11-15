@@ -73,7 +73,7 @@ FRAME_HEADER = struct.Struct("<IIIIHBBBB")         # ack snapshot, ack event, cl
 EQUIP_BLOB = struct.Struct("<BB")                  # lethal, tactical (appended to the connect request)
 FIRE_RECORD = struct.Struct("<HIIB")               # shot seq, command tick, client view time (ms), weapon slot
 SNAP_HEADER = struct.Struct("<IIIHIHBBB")          # tick, baseline, ack cmd, ack shot, echo ms, hold ms, flags, n rel, n transient
-MATCH_STATE = struct.Struct("<HHHBB")              # score 0, score 1, seconds left, phase, winner
+MATCH_STATE = struct.Struct("<HHHBB3B3b")          # scores, seconds left, phase, winner, uplink owners and charges
 ENT_MASKS = struct.Struct("<HHHH")                 # active, transform changed, orientation changed, state changed
 ROSTER_ENTRY = struct.Struct("<BBBHHIHB")          # id, team, flags, kills, deaths, score, ping, name length
 _U16 = struct.Struct("<H")
@@ -103,6 +103,7 @@ _EVENT_FORMATS = {
     S.EV_STATUS: struct.Struct("<BH"),              # status, ticks
     S.EV_LADDER: struct.Struct("<BBBB"),            # player, step, cause, other player
     S.EV_STREAK: struct.Struct("<BBBhhh"),          # player, reward, action, position
+    S.EV_UPLINK: struct.Struct("<BBB"),             # zone, team, action
     S.EV_REWARD: struct.Struct("<IHB"),             # credits, xp, reason
     S.EV_MATCH: struct.Struct("<BBBBI"),            # phase, winner, map, mode, map crc
 }
@@ -258,6 +259,22 @@ def quantize_world(store: PlayerStore, tick: int) -> WorldFrame:
     return frame
 
 
+def pack_uplinks(world) -> tuple:
+    """Three owner bytes (0 neutral, 1 + squad; bit 7 = contested) and three charges scaled to +-127."""
+    owner = np.zeros(3, dtype=np.int64)
+    charge = np.zeros(3, dtype=np.int64)
+    count = min(len(world.uplink_owner), 3)
+    owner[:count] = (world.uplink_owner[:count] + 1) | (world.uplink_contested[:count].astype(np.int64) << 7)
+    charge[:count] = np.clip(np.rint(world.uplink_charge[:count] * 127.0), -127, 127)
+    return tuple(int(v) for v in owner) + tuple(int(v) for v in charge)
+
+
+def unpack_uplinks(zones) -> tuple:
+    owner = np.array([(v & 0x7F) - 1 for v in zones[:3]], dtype=np.int64)
+    contested = np.array([bool(v & 0x80) for v in zones[:3]])
+    return owner, contested, np.array(zones[3:6], dtype=np.float64) / 127.0
+
+
 def encode_entities(frame: WorldFrame, baseline: WorldFrame | None) -> bytes:
     """
     Delta encode ``frame`` against ``baseline`` (``None`` produces a full
@@ -328,6 +345,8 @@ def encode_event(event: tuple) -> bytes:
         body = fmt.pack(event[1] & 0xFF, min(int(event[2]), 255), event[3] & 0xFF, event[4] & 0xFF)
     elif kind == S.EV_STREAK:
         body = fmt.pack(event[1] & 0xFF, event[2] & 0xFF, event[3] & 0xFF, *quantize_position(event[4]))
+    elif kind == S.EV_UPLINK:
+        body = fmt.pack(event[1] & 0xFF, event[2] & 0xFF, event[3] & 0xFF)
     elif kind == S.EV_REWARD:
         body = fmt.pack(int(event[2]) & 0xFFFFFFFF, min(int(event[3]), 65535), event[4])
     elif kind == S.EV_MATCH:
@@ -365,6 +384,8 @@ def decode_event(data: bytes, offset: int):
         event = (kind, f[0], f[1], f[2], f[3])
     elif kind == S.EV_STREAK:
         event = (kind, f[0], f[1], f[2], _unq(f[3:6], C.POS_QUANT))
+    elif kind == S.EV_UPLINK:
+        event = (kind, f[0], f[1], f[2])
     elif kind == S.EV_REWARD:
         event = (kind, f[0], f[1], f[2])
     else:
@@ -1201,7 +1222,8 @@ class GameServer:
             return
         winner = world.winner if world.phase == C.PHASE_ENDED else S.NO_PLAYER
         match = MATCH_STATE.pack(min(int(world.team_scores[0]), 65535), min(int(world.team_scores[1]), 65535),
-                                 min(int(np.ceil(world.time_left)), 65535), world.phase, winner & 0xFF)
+                                 min(int(np.ceil(world.time_left)), 65535), world.phase, winner & 0xFF,
+                                 *pack_uplinks(world))
         encoded: dict = {}
         for conn in self.conns.values():
             baseline = ring[conn.ack_snapshot % C.SNAPSHOT_RING] if conn.ack_snapshot > 0 else None
@@ -1621,6 +1643,9 @@ class GameClient:
         self.events: list = []
         self.roster: dict = {}
         self.scores = [0, 0]
+        self.uplink_owner = np.full(3, -1, dtype=np.int64)
+        self.uplink_contested = np.zeros(3, dtype=bool)
+        self.uplink_charge = np.zeros(3)
         self.time_left = 0
         self.phase = C.PHASE_LIVE
         self.winner = S.NO_PLAYER
@@ -1826,8 +1851,9 @@ class GameClient:
         if tick <= self.last_snapshot_tick:
             self.stats["dropped_snapshots"] += 1
             return
-        score0, score1, seconds, phase, winner = MATCH_STATE.unpack_from(data, offset)
+        score0, score1, seconds, phase, winner, *zones = MATCH_STATE.unpack_from(data, offset)
         offset += MATCH_STATE.size
+        self.uplink_owner, self.uplink_contested, self.uplink_charge = unpack_uplinks(zones)
         owner_offset = -1
         if flags & SNAP_HAS_OWNER:
             owner_offset = offset

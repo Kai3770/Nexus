@@ -2283,6 +2283,19 @@ class SceneRenderer:
                              size=(radius * 0.30, radius * 0.62), life=(2.6, 3.8), gravity=-0.02, drag=1.4,
                              jitter=radius * 0.38)
 
+    def fx_uplink(self, position, rgb, dt: float, contested: bool = False) -> None:
+        """An UPLINK zone: a ring of sparks in the holder's colour and data pulses rising from it (every frame)."""
+        p = np.asarray(position, dtype=np.float64)
+        rng = self.sparks.rng
+        rgba = (float(rgb[0]), float(rgb[1]), float(rgb[2]), 0.85)
+        for angle in rng.uniform(0.0, 2.0 * np.pi, int(rng.poisson(26.0 * dt * max(self.particle_scale, 0.6)))):
+            spot = p + np.array([math.cos(angle) * C.UPLINK_RADIUS, 0.12, math.sin(angle) * C.UPLINK_RADIUS])
+            self.sparks.emit(spot, 1, direction=(0.0, 1.0, 0.0), spread=0.15, speed=(0.3, 1.0), rgba=rgba,
+                             size=(0.08, 0.02), life=(0.4, 0.8), gravity=-0.15)
+        if rng.random() < (5.0 if contested else 2.5) * dt:
+            self.tracers.add(p + np.array([0.0, 0.2, 0.0]), p + np.array([0.0, 14.0, 0.0]), rgba, 0.05,
+                             speed=24.0, streak=1.6)
+
     def fx_lance_mark(self, position, progress: float, dt: float) -> None:
         """A marked ORBITAL LANCE: red sparks on a ring that closes in, and a targeting beam (call every frame)."""
         p = np.asarray(position, dtype=np.float64)
@@ -2368,9 +2381,16 @@ ABILITY_WIDTH = 0.142
 RADAR_DOTS = C.MAX_PLAYERS                # every other player can show on the minimap
 RADAR_STRIKES = 4                         # marked orbital lances shown at once
 MINIMAP_SIZE = 0.21                       # side of the square minimap (UI units)
+RADAR_ZONES = 3                           # UPLINK zones on the minimap
 (Q_CROSS, Q_DOT, Q_HIT, Q_INDICATOR, Q_HEALTH_BACK, Q_HEALTH, Q_ABILITY_BACK, Q_ABILITY, Q_TACTICAL_BACK, Q_TACTICAL,
- Q_SHIELD, Q_RADAR_SELF, Q_RADAR_DOTS, Q_RADAR_STRIKES, HUD_QUADS) = (0, 4, 5, 9, 15, 16, 17, 18, 19, 20, 21, 22, 24,
-                                                                    24 + RADAR_DOTS, 24 + RADAR_DOTS + RADAR_STRIKES)
+ Q_SHIELD, Q_RADAR_ZONES) = (0, 4, 5, 9, 15, 16, 17, 18, 19, 20, 21, 22)
+Q_RADAR_SELF = Q_RADAR_ZONES + RADAR_ZONES             # zones first: the dots are drawn on top of them
+Q_RADAR_DOTS = Q_RADAR_SELF + 2
+Q_RADAR_STRIKES = Q_RADAR_DOTS + RADAR_DOTS
+Q_UPLINK_BACK = Q_RADAR_STRIKES + RADAR_STRIKES
+Q_UPLINK = Q_UPLINK_BACK + 1
+HUD_QUADS = Q_UPLINK + 1
+UPLINK_BAR = 0.30                         # width of the capture bar
 
 
 class HUD:
@@ -2462,12 +2482,27 @@ class HUD:
         self.board_stats = Text("", parent=self.board, position=(0.10, 0.265), scale=0.85, origin=(-0.5, 0.5),
                                 color=_rgba(*HUD_WHITE))
         self._board_stamp = None
+        # ---- match report: left of the scoreboard during the intermission (both shrink on narrow screens) ----
+        fit = min(1.0, (2.0 * hw - 0.08) / 1.65)
+        self._layout_fit = fit
+        self._board_shift = -hw + 0.04 + (0.56 + 0.03 + 0.53) * fit
+        self.report = Entity(parent=self.root, enabled=False, z=-2.0, position=(-hw + 0.04 + 0.28 * fit, 0.0), scale=fit)
+        Entity(parent=self.report, model="quad", color=_rgba(0.02, 0.03, 0.05, 0.86), scale=(0.56, 0.70), z=0.5)
+        self.report_title = Text("MATCH REPORT", parent=self.report, position=(0, 0.315), scale=1.3, origin=(0, 0),
+                                 color=_rgba(*HUD_GOLD))
+        self.report_body = Text("", parent=self.report, position=(-0.25, 0.265), scale=0.82, origin=(-0.5, 0.5),
+                                color=_rgba(*HUD_WHITE))
+        self._report_stamp = None
         # ---- shield, scorestreaks, death recap, alerts ---------------------------------------------------------
         self.shield_text = self._text("", -hw + 0.372, -0.445, 0.95, (-0.5, 0), HUD_CYAN)
         self.streak_text = self._text("", -hw + 0.045, -0.392, 0.62, (-0.5, 0), HUD_DIM)
         self.ready_text = self._text("", -hw + 0.045, -0.366, 0.74, (-0.5, 0), HUD_GOLD)
         self.recap_text = self._text("", 0.0, 0.048, 0.80, (0, 0), HUD_WHITE)
-        self.alert_text = self._text("", 0.0, 0.398, 0.78, (0, 0), HUD_CRIMSON)
+        self.alert_text = self._text("", 0.0, 0.372, 0.78, (0, 0), HUD_CRIMSON)
+        # ---- UPLINK: zone strip under the score, markers over the zones, capture bar --------------------------
+        self.zone_letters = [self._text("", x, 0.404, 1.05, (0, 0), HUD_WHITE) for x in (-0.05, 0.0, 0.05)]
+        self.zone_markers = [self._text("", 0.0, 0.0, 0.85, (0, 0), HUD_WHITE) for _ in range(3)]
+        self.capture_text = self._text("", 0.0, -0.118, 0.85, (0, 0), HUD_WHITE)
         # ---- minimap: the arena picture (own entity, drawn under the vector table) plus radar quads ----------
         self.minimap = None
         self.minimap_bounds = None
@@ -2625,7 +2660,7 @@ class HUD:
         ``yaw``, other players ``others`` (``(N, 3)``) in ``colors`` (RGBA; alpha
         0 hides one) and up to four marked lances ``(position, progress)``.
         """
-        self.q_rgba[Q_RADAR_SELF: HUD_QUADS, 3] = 0.0
+        self.q_rgba[Q_RADAR_SELF: Q_RADAR_STRIKES + RADAR_STRIKES, 3] = 0.0
         if self.minimap_bounds is None or own is None:
             return
         me = self._radar_point(np.asarray(own)[[0, 2]])[0]
@@ -2649,6 +2684,50 @@ class HUD:
             self.q_rot[slot] = math.pi / 4.0
             self.q_rgba[slot] = (1.0, 0.16, 0.10, 0.25 + 0.35 * pulse * (0.5 + 0.5 * progress))
 
+    def set_radar_zones(self, zones=(), colors=()) -> None:
+        """UPLINK zones on the minimap: discs of the zone radius in the holder's colour."""
+        self.q_rgba[Q_RADAR_ZONES: Q_RADAR_ZONES + RADAR_ZONES, 3] = 0.0
+        if self.minimap_bounds is None:
+            return
+        reach = C.UPLINK_RADIUS / self.minimap_bounds[2] * MINIMAP_SIZE
+        for i, (position, rgba) in enumerate(list(zip(zones, colors))[:RADAR_ZONES]):
+            slot = Q_RADAR_ZONES + i
+            self.q_pos[slot] = self._radar_point(np.asarray(position)[[0, 2]])[0]
+            self.q_half[slot] = (reach * 0.75, reach * 0.75)
+            self.q_rot[slot] = math.pi / 4.0
+            self.q_rgba[slot] = rgba
+
+    # ---- UPLINK ------------------------------------------------------------------------------------------------
+    def set_uplink_strip(self, colors=None) -> None:
+        """The A / B / C letters under the score in their holders' colours (``None`` hides them)."""
+        for i, letter in enumerate(self.zone_letters):
+            self._set(letter, C.UPLINK_NAMES[i] if colors is not None else "")
+            if colors is not None:
+                self._color(letter, colors[i])
+
+    def set_uplink_markers(self, items=()) -> None:
+        """On-screen labels over the zones: ``(x, y, text, rgb)`` per zone or ``None`` when off screen."""
+        items = list(items) + [None] * (len(self.zone_markers) - len(items))
+        for marker, item in zip(self.zone_markers, items):
+            if item is None:
+                self._set(marker, "")
+                continue
+            x, y, text, rgb = item
+            self._set(marker, text)
+            marker.position = (x, y)
+            self._color(marker, rgb)
+
+    def set_uplink_capture(self, text: str, mine: float = 0.0, own=HUD_WHITE, enemy=HUD_CRIMSON) -> None:
+        """Capture bar while standing in a zone: grows right in your colour, left in the enemy's."""
+        self._set(self.capture_text, text)
+        if not text:
+            self.q_rgba[Q_UPLINK_BACK: Q_UPLINK + 1, 3] = 0.0
+            return
+        self._bar(Q_UPLINK_BACK, -UPLINK_BAR * 0.5, -0.145, UPLINK_BAR, 0.010, (0.05, 0.06, 0.08), 0.75)
+        width = UPLINK_BAR * 0.5 * min(abs(mine), 1.0)
+        left = 0.0 if mine >= 0.0 else -width
+        self._bar(Q_UPLINK, left, -0.145, max(width, 1.0e-4), 0.007, own if mine >= 0.0 else enemy, 0.95)
+
     # ---- shield, scorestreaks, recap, alerts -----------------------------------------------------------------
     def set_shield(self, points: float, maximum: float) -> None:
         fraction = min(max(points / max(maximum, 1.0), 0.0), 1.0)
@@ -2661,6 +2740,17 @@ class HUD:
     def set_streak(self, line: str, ready: str) -> None:
         self._set(self.streak_text, line)
         self._set(self.ready_text, ready)
+
+    def set_report(self, text) -> None:
+        """The match report beside the scoreboard; ``None`` / "" hides it and centres the scoreboard again."""
+        visible = bool(text)
+        if self.report.enabled != visible:
+            self.report.enabled = visible
+            self.board.x = self._board_shift if visible else 0.0
+            self.board.scale = self._layout_fit if visible else 1.0
+        if visible and text != self._report_stamp:
+            self._report_stamp = text
+            self.report_body.text = text
 
     def set_recap(self, text: str) -> None:
         self._set(self.recap_text, text)
@@ -2677,7 +2767,7 @@ class HUD:
         if mode == C.MODE_ESC:
             self._set(self.score_text, "WEAPON  %d / %d   |   %s" % (min(own_step + 1, limit), limit, clock))
             self._set(self.mode_text, ("%s  -  %s" % (C.MODE_NAMES[mode], detail)) if detail else C.MODE_NAMES[mode])
-        elif mode == C.MODE_TDM:
+        elif C.team_mode(mode):
             self._set(self.score_text, "%s  %d   |   %s   |   %d  %s" % (C.TEAM_NAMES[0], scores[0], clock, scores[1],
                                                                         C.TEAM_NAMES[1]))
             self._set(self.mode_text, "%s  -  FIRST TO %d  -  YOU FIGHT FOR %s" % (C.MODE_NAMES[mode], limit,

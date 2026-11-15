@@ -183,6 +183,10 @@ SOUND_RECIPES = {
     "shield_break": lambda: _mix(click(0.08, 3200.0, 303, 0.9), crackle(0.45, 304)),
     "lance_mark": lambda: _mix(buzz(0.9, 196.0), chime((440.0, 466.0), 0.30, 0.25)),
     "lance_impact": lambda: _mix(explosion(1.9, 305), thud(0.6, 55.0, 306, 0.2)),
+    "uplink_captured": lambda: chime((659.0, 880.0, 1319.0), 0.13, 0.10),                # UPLINK and the report
+    "uplink_lost": lambda: _mix(chime((880.0, 659.0, 494.0), 0.14, 0.10), buzz(0.25, 110.0)),
+    "medal": lambda: chime((1047.0, 1568.0, 2093.0), 0.09, 0.07),
+    "contract": lambda: chime((523.0, 659.0, 784.0, 1047.0, 1319.0), 0.10, 0.10),
 }
 
 

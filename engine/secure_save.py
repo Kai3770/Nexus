@@ -216,7 +216,8 @@ DEFAULT_SETTINGS = {
     "vsync": C.VSYNC_DEFAULT, "fps_limit": C.FPS_LIMIT_DEFAULT,
 }
 STAT_KEYS = ("kills", "deaths", "headshots", "shots", "hits", "damage", "matches", "wins",
-             "best_streak", "grenade_kills", "playtime", "credits_from_sponsors", "credits_from_combat")
+             "best_streak", "grenade_kills", "playtime", "credits_from_sponsors", "credits_from_combat",
+             "captures", "medals", "rewards_used", "contracts")
 
 
 class SaveTamperError(Exception):
@@ -247,6 +248,7 @@ class Profile:
         self.equipment = [EQ.EQUIP_KEYS[i] for i in EQ.DEFAULT_EQUIPMENT]           # lethal, tactical
         self.stats = {key: 0.0 for key in STAT_KEYS}
         self.settings = dict(DEFAULT_SETTINGS)
+        self.contracts = empty_contracts()
         self.integrity_strikes = 0
 
     def to_dict(self) -> dict:
@@ -255,7 +257,7 @@ class Profile:
             "saved_at": self.saved_at, "credits": self.credits, "lifetime_credits": self.lifetime_credits,
             "xp": self.xp, "level": self.level, "prestige": self.prestige, "weapons": self.weapons,
             "operator": self.operator, "sponsors": self.sponsors, "loadout": self.loadout, "stats": self.stats,
-            "gear": self.gear, "equipment": self.equipment,
+            "gear": self.gear, "equipment": self.equipment, "contracts": self.contracts,
             "settings": self.settings, "integrity_strikes": self.integrity_strikes,
         }
 
@@ -318,7 +320,61 @@ class Profile:
         p.settings["quality"] = int(np.clip(p.settings["quality"], 0, len(C.GRAPHICS_PRESETS) - 1))
         p.settings["fps_limit"] = int(np.clip(p.settings["fps_limit"], 0, 360))
         p.integrity_strikes = max(int(raw.get("integrity_strikes", 0)), 0)
+        contracts = raw.get("contracts", {})
+        if isinstance(contracts, dict):
+            daily = [_clean_contract(e, False) for e in list(contracts.get("daily", []) or [])[: C.DAILY_CONTRACTS]]
+            p.contracts = {"day": int(contracts.get("day", -1)), "week": int(contracts.get("week", -1)),
+                           "daily": [e for e in daily if e is not None],
+                           "weekly": _clean_contract(contracts.get("weekly"), True)}
         return p
+
+
+# =========================================================================== #
+#  Contracts (daily and weekly challenges)
+# =========================================================================== #
+CONTRACT_ROWS = {row[0]: dict(zip(C.CONTRACT_COLUMNS, row)) for row in C.CONTRACT_TABLE}
+CONTRACT_KEYS = tuple(CONTRACT_ROWS)
+
+
+def contract_day(now: float) -> int:
+    """UTC days since the epoch."""
+    return int(float(now) // 86400.0)
+
+
+def contract_week(day: int) -> int:
+    """Weeks since the epoch, starting on Monday (the epoch was a Thursday)."""
+    return (int(day) + 3) // 7
+
+
+def daily_contracts(day: int) -> list:
+    rng = np.random.default_rng(int(day) * 7919 + 17)
+    picks = rng.choice(len(CONTRACT_KEYS), size=min(C.DAILY_CONTRACTS, len(CONTRACT_KEYS)), replace=False)
+    return [CONTRACT_KEYS[int(i)] for i in picks]
+
+
+def weekly_contract(week: int) -> str:
+    rng = np.random.default_rng(int(week) * 104729 + 3)
+    return CONTRACT_KEYS[int(rng.integers(0, len(CONTRACT_KEYS)))]
+
+
+def contract_target(key: str, weekly: bool) -> float:
+    return float(CONTRACT_ROWS[key]["weekly" if weekly else "daily"])
+
+
+def contract_text(key: str, weekly: bool) -> str:
+    return CONTRACT_ROWS[key]["text"].format(n="{:,}".format(int(contract_target(key, weekly))))
+
+
+def empty_contracts() -> dict:
+    return {"day": -1, "week": -1, "daily": [], "weekly": None}
+
+
+def _clean_contract(entry, weekly: bool):
+    if not isinstance(entry, dict) or entry.get("key") not in CONTRACT_ROWS:
+        return None
+    target = contract_target(entry["key"], weekly)
+    progress = float(np.clip(float(entry.get("progress", 0.0)), 0.0, target))
+    return {"key": entry["key"], "progress": progress, "done": bool(entry.get("done", False)) or progress >= target}
 
 
 def default_gear() -> dict:
@@ -391,6 +447,8 @@ class ProfileManager:
         self.offline_credits = 0.0
         self.dirty = False
         self.session_started = time.time()
+        self.clock = time.time                    # replaceable in tests (contract rotation)
+        self.notices: list = []                   # (title, text, credits) for finished contracts
 
     # ---- persistence -------------------------------------------------------------
     def load(self) -> str:
@@ -435,6 +493,7 @@ class ProfileManager:
                     self._credit(earned, "credits_from_sponsors")
             self.dirty = True
             self.session_started = time.time()
+            self.refresh_contracts()
             return status
 
     def _quarantine(self, path: Path) -> None:
@@ -698,6 +757,69 @@ class ProfileManager:
                 current = self.profile.stats[stat]
                 self.profile.stats[stat] = max(current, amount) if maximum else current + amount
                 self.dirty = True
+                if not maximum:
+                    self._advance_contracts(stat, float(amount))
+
+    # ---- contracts ------------------------------------------------------------------
+    def refresh_contracts(self) -> bool:
+        """Roll the daily / weekly contracts over when the UTC day / week changed; True if anything changed."""
+        day = contract_day(self.clock())
+        week = contract_week(day)
+        with self.lock:
+            contracts = self.profile.contracts
+            changed = False
+            if contracts["day"] != day or not contracts["daily"]:
+                contracts["day"] = day
+                contracts["daily"] = [{"key": key, "progress": 0.0, "done": False} for key in daily_contracts(day)]
+                changed = True
+            if contracts["week"] != week or contracts["weekly"] is None:
+                contracts["week"] = week
+                contracts["weekly"] = {"key": weekly_contract(week), "progress": 0.0, "done": False}
+                changed = True
+            self.dirty |= changed
+            return changed
+
+    def _advance_contracts(self, stat: str, amount: float) -> None:
+        self.refresh_contracts()
+        contracts = self.profile.contracts
+        for weekly, entry in [(False, e) for e in contracts["daily"]] + [(True, contracts["weekly"])]:
+            if entry is None or entry["done"] or CONTRACT_ROWS[entry["key"]]["stat"] != stat:
+                continue
+            target = contract_target(entry["key"], weekly)
+            entry["progress"] = min(entry["progress"] + amount, target)
+            if entry["progress"] >= target:
+                entry["done"] = True
+                reward = C.CONTRACT_REWARDS[1 if weekly else 0]
+                self._credit(reward, None)
+                self.profile.stats["contracts"] += 1
+                self.notices.append(("WEEKLY CONTRACT COMPLETE" if weekly else "CONTRACT COMPLETE",
+                                     contract_text(entry["key"], weekly), reward))
+
+    def contract_rows(self) -> list:
+        """What the CONTRACTS screen shows, daily first."""
+        self.refresh_contracts()
+        with self.lock:
+            contracts = self.profile.contracts
+            rows = []
+            for weekly, entry in [(False, e) for e in contracts["daily"]] + [(True, contracts["weekly"])]:
+                if entry is None:
+                    continue
+                rows.append({"scope": "WEEKLY" if weekly else "DAILY", "text": contract_text(entry["key"], weekly),
+                             "progress": entry["progress"], "target": contract_target(entry["key"], weekly),
+                             "reward": C.CONTRACT_REWARDS[1 if weekly else 0], "done": entry["done"]})
+            return rows
+
+    def contract_resets(self) -> tuple:
+        """Seconds until the daily and the weekly contracts renew."""
+        now = float(self.clock())
+        day = contract_day(now)
+        next_week_day = (contract_week(day) + 1) * 7 - 3
+        return (day + 1) * 86400.0 - now, next_week_day * 86400.0 - now
+
+    def pop_notices(self) -> list:
+        with self.lock:
+            notices, self.notices = self.notices, []
+            return notices
 
     def set_setting(self, key: str, value) -> None:
         with self.lock:

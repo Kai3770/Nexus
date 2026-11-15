@@ -24,7 +24,7 @@ import os
 import sys
 import time
 
-MODES = {"tdm": 0, "ffa": 1, "esc": 2}         # team deathmatch, free for all, ESCALATION
+MODES = {"tdm": 0, "ffa": 1, "esc": 2, "uplink": 3}   # team deathmatch, free for all, ESCALATION, UPLINK
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)

@@ -112,7 +112,7 @@ BROADCAST_ADDRESS = "255.255.255.255"
 BEACON_INTERVAL = 1.0
 BEACON_EXPIRY = 3.5
 PROTOCOL_MAGIC = 0x584E
-PROTOCOL_VERSION = 13
+PROTOCOL_VERSION = 14
 MAX_DATAGRAM = 1200
 RECV_BUFFER = 4096
 CONNECT_RETRY_INTERVAL = 0.25
@@ -499,6 +499,7 @@ AUDIO_CATEGORY = {
     "escalate": "announcer", "final_weapon": "announcer", "demoted": "announcer",
     "streak_ready": "announcer", "scan": "feedback", "shield_up": "feedback", "shield_break": "impact",
     "lance_mark": "explosion", "lance_impact": "explosion",
+    "uplink_captured": "announcer", "uplink_lost": "announcer", "medal": "announcer", "contract": "announcer",
 }
 AUDIO_MIN_GAIN = 0.003                   # quieter cues are not started at all
 AUDIO_DUCK_WINDOW = 0.07                 # seconds; overlapping cues of one category are attenuated
@@ -511,12 +512,19 @@ AUDIO_PAN_STRENGTH = 0.8
 MODE_TDM = 0
 MODE_FFA = 1
 MODE_ESC = 2
-MODE_NAMES = ("TEAM DEATHMATCH", "FREE FOR ALL", "ESCALATION")
+MODE_UPLINK = 3
+MODE_NAMES = ("TEAM DEATHMATCH", "FREE FOR ALL", "ESCALATION", "UPLINK")
+TEAM_MODES = (MODE_TDM, MODE_UPLINK)       # two squads, team spawns, squad-friendly rewards
 MODE_DESCRIPTIONS = (
     "Two squads, first to the score limit - your own loadout and equipment",
     "Everyone for themselves, first to the elimination limit - your own loadout",
     "Every kill hands you the next gun, a kill with the last one wins - hatchet kills steal a step",
+    "Two squads fight over three uplinks; every held uplink scores - first to the limit wins",
 )
+
+
+def team_mode(mode) -> bool:
+    return int(mode) in TEAM_MODES
 PHASE_WARMUP = 0
 PHASE_LIVE = 1
 PHASE_ENDED = 2
@@ -539,6 +547,60 @@ ESCALATION_LADDER = (
 ESCALATION_LETHAL = "hatchet"           # equipment key every player throws in ESCALATION
 ESCALATION_STEAL = 1                    # steps a hatchet kill takes from the victim
 ESCALATION_SUICIDE_PENALTY = 1          # steps lost when you kill yourself
+
+# UPLINK: three zones per arena, derived from the map (the centre and halfway to each squad's spawns, snapped to
+# the navigation graph), so every arena -- also a JSON drop-in -- supports the mode without extra data.  Squad
+# members inside an uplink with no enemy present drain it towards their side: an enemy uplink is neutralised
+# first, then captured.  Every held uplink scores a point every UPLINK_POINT_INTERVAL seconds; kills score nothing.
+UPLINK_NAMES = ("A", "B", "C")
+UPLINK_SCORE_LIMIT = 150
+UPLINK_RADIUS = 4.0                      # metres, horizontal
+UPLINK_HEIGHT = 2.5                      # how far above the uplink's floor a player still counts
+UPLINK_CAPTURE_TIME = 6.0                # seconds for one player to swing an uplink fully (two: 4 s, three or more: 3 s)
+UPLINK_POINT_INTERVAL = 2.0
+UPLINK_REWARD = (150, 75)                # credits and XP for every capturer
+
+# --------------------------------------------------------------------------- #
+#  Medals and the match report (client side; every medal is worth MEDAL_XP)
+# --------------------------------------------------------------------------- #
+MEDAL_COLUMNS = ("key", "name", "description")
+MEDAL_TABLE = (
+    ("first_strike", "FIRST STRIKE", "The first elimination of the match"),
+    ("double", "DOUBLE DOWN", "Two eliminations within four seconds"),
+    ("triple", "TRIPLE THREAT", "Three eliminations, each within four seconds of the last"),
+    ("iron_will", "IRON WILL", "Five eliminations without dying"),
+    ("overdrive", "OVERDRIVE", "Ten eliminations without dying"),
+    ("payback", "PAYBACK", "Eliminate the player who last eliminated you"),
+    ("headhunter", "HEADHUNTER", "Five headshots in one match"),
+    ("demolition", "DEMOLITION", "Three eliminations with equipment in one match"),
+    ("starfall", "STARFALL", "An elimination with the ORBITAL LANCE"),
+    ("uplinker", "UPLINKER", "Capture three uplinks in one match"),
+    ("sharpshooter", "SHARPSHOOTER", "Half of your shots hit (at least 30 shots)"),
+    ("mvp", "MVP", "The best score of the match"),
+)
+MEDAL_CHAIN_TIME = 4.0                   # seconds between eliminations for DOUBLE DOWN / TRIPLE THREAT
+MEDAL_XP = 50
+
+# --------------------------------------------------------------------------- #
+#  Contracts: three daily and one weekly challenge over the profile statistics
+# --------------------------------------------------------------------------- #
+# The rotation is picked from the UTC date (days since the epoch, weeks starting on Monday), so everybody gets the
+# same contracts on the same day.  Progress counts what the profile records; a finished contract pays at once.
+CONTRACT_COLUMNS = ("key", "stat", "daily", "weekly", "text")
+CONTRACT_TABLE = (
+    ("eliminations", "kills", 15, 120, "Eliminate {n} enemies"),
+    ("headshots", "headshots", 5, 40, "Land {n} headshots"),
+    ("victories", "wins", 2, 10, "Win {n} matches"),
+    ("matches", "matches", 3, 20, "Finish {n} matches"),
+    ("damage", "damage", 2500, 20000, "Deal {n} damage"),
+    ("equipment", "grenade_kills", 3, 25, "Eliminate {n} enemies with equipment"),
+    ("uplinks", "captures", 3, 25, "Capture {n} uplinks"),
+    ("medals", "medals", 5, 40, "Earn {n} medals"),
+    ("rewards", "rewards_used", 2, 15, "Use {n} scorestreak rewards"),
+    ("hits", "hits", 80, 700, "Land {n} hits"),
+)
+DAILY_CONTRACTS = 3
+CONTRACT_REWARDS = (2500.0, 15000.0)     # credits for a daily / the weekly contract
 MATCH_TIME_LIMIT = 600.0
 INTERMISSION_TIME = 12.0
 TEAM_NAMES = ("VANTA", "HELIX")

@@ -987,3 +987,38 @@ def minimap_image(data: MapData, size: int = 192, margin: float = 3.0):
     rgba[[0, -1], :] = (0.55, 0.62, 0.70, 0.95)               # frame
     rgba[:, [0, -1]] = (0.55, 0.62, 0.70, 0.95)
     return (np.clip(rgba, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8), (x0, z0, span)
+
+
+# =========================================================================== #
+#  UPLINK zones
+# =========================================================================== #
+def uplink_zones(loaded: LoadedMap, reach: float = 0.55):
+    """
+    The three UPLINK zones of an arena, A on squad 0's side, B in the centre
+    and C on squad 1's side: the midpoint of the two squads' spawn areas and
+    the points ``reach`` of the way from it towards each squad, each snapped
+    to the nearest navigation node (so a zone always lies on walkable floor
+    and the bots can path to it).  Deterministic, so server and clients agree
+    without sending positions.  Returns ``(positions (3, 3), nodes (3,))``.
+    """
+    data = loaded.data
+    spawns = np.asarray(data.spawn_pos, dtype=np.float64)
+    sides = [spawns[np.asarray(data.spawn_team) == team] for team in (0, 1)]
+    if any(len(side) == 0 for side in sides):                   # no squad spawns: split along the long axis
+        axis = int(np.argmax(np.ptp(spawns[:, [0, 2]], axis=0))) * 2
+        cut = np.median(spawns[:, axis])
+        sides = [spawns[spawns[:, axis] <= cut], spawns[spawns[:, axis] > cut]]
+    home = [side.mean(axis=0) for side in sides]
+    centre = (home[0] + home[1]) * 0.5
+    wanted = np.array([centre + (home[0] - centre) * reach, centre, centre + (home[1] - centre) * reach])
+    nav = loaded.nav
+    if nav is None or nav.count == 0:
+        return wanted, np.full(3, -1, dtype=np.int64)
+    nodes = nav.nearest(wanted, max_height=1.0e6).astype(np.int64)
+    # B must be as far from A as from C: among the nodes near the centre take the most even one
+    flat = nav.nodes[:, [0, 2]]
+    to_a = np.linalg.norm(flat - nav.nodes[nodes[0], [0, 2]], axis=1)
+    to_c = np.linalg.norm(flat - nav.nodes[nodes[2], [0, 2]], axis=1)
+    off_centre = np.linalg.norm(flat - centre[[0, 2]], axis=1) + 0.5 * np.abs(nav.nodes[:, 1] - centre[1])
+    nodes[1] = int(np.argmin(3.0 * np.abs(to_a - to_c) + off_centre))
+    return nav.nodes[nodes].copy(), nodes

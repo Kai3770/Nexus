@@ -64,6 +64,10 @@ STREAK_EARNED = 0   # the reward is ready for ``player`` (only that player hears
 STREAK_USED = 1     # activated; for the lance the position is the marked spot
 STREAK_IMPACT = 2   # the lance strikes the position
 STREAK_BROKEN = 3   # an AEGIS shield was shot away
+EV_UPLINK = 14      # (EV_UPLINK, zone, team, action)   UPLINK zone changes hands
+
+UPLINK_CAPTURED = 0     # ``team`` now holds the zone
+UPLINK_NEUTRALISED = 1  # ``team`` lost the zone (it is neutral again)
 
 KILL_HEADSHOT = 1
 KILL_EXPLOSIVE = 2
@@ -74,7 +78,8 @@ REWARD_KILL = 1
 REWARD_HEADSHOT = 2
 REWARD_WIN = 3
 REWARD_MATCH = 4
-REWARD_NAMES = ("COMBAT", "ELIMINATION", "HEADSHOT", "VICTORY", "MATCH COMPLETE")
+REWARD_CAPTURE = 5
+REWARD_NAMES = ("COMBAT", "ELIMINATION", "HEADSHOT", "VICTORY", "MATCH COMPLETE", "CAPTURE")
 
 WEAPON_GRENADE = 255                 # pseudo weapon id of kills by falling after a knock-back
 NO_PLAYER = 255
@@ -487,8 +492,8 @@ class GameWorld:
                  capacity: int = C.MAX_PLAYERS):
         self.mode = int(mode)
         self.upgrades_enabled = bool(upgrades_enabled)
-        self.score_limit = int(score_limit) if score_limit else (
-            C.TDM_SCORE_LIMIT if self.mode == C.MODE_TDM else C.FFA_SCORE_LIMIT)
+        self.score_limit = int(score_limit) if score_limit else {
+            C.MODE_TDM: C.TDM_SCORE_LIMIT, C.MODE_UPLINK: C.UPLINK_SCORE_LIMIT}.get(self.mode, C.FFA_SCORE_LIMIT)
         if self.mode == C.MODE_ESC:
             self.score_limit = W.ESCALATION_STEPS            # completing the ladder is the only way to win
         self.time_limit = float(time_limit)
@@ -510,6 +515,7 @@ class GameWorld:
         self.loaded = maps.load_map(map_key)
         self.map_index = self.loaded.data.index
         self.world = self.loaded.world
+        self._init_uplinks()
 
     # ---- map handling ----------------------------------------------------------------
     def change_map(self, map_key) -> None:
@@ -519,6 +525,7 @@ class GameWorld:
         self.grenades.clear()
         self.zones.clear()
         self.strikes.clear()
+        self._init_uplinks()
         self.store.move._cache_version = -1
 
     # ---- membership --------------------------------------------------------------------
@@ -551,7 +558,7 @@ class GameWorld:
         s.apply_operator(row, operator, prestige)
         s.apply_equipment(row, self.mode_equipment(EQ.DEFAULT_EQUIPMENT if equipment is None else equipment))
         s.tactical_ready[row] = 0
-        if self.mode == C.MODE_TDM:
+        if C.team_mode(self.mode):
             if team is None or team not in (0, 1):
                 counts = np.bincount(s.team[s.active & (np.arange(s.capacity) != row)], minlength=2)[:2]
                 team = int(np.argmin(counts))
@@ -592,7 +599,7 @@ class GameWorld:
     def choose_spawn(self, row: int):
         """Spawn point of the player's side that is farthest from every living enemy."""
         s, data = self.store, self.loaded.data
-        if self.mode == C.MODE_TDM:
+        if C.team_mode(self.mode):
             options = np.flatnonzero(data.spawn_team == s.team[row])
         else:
             options = np.arange(data.spawn_pos.shape[0])
@@ -851,6 +858,62 @@ class GameWorld:
         weapon = C.STREAK_KILL_BASE + ST.LANCE
         for row, amount in zip(rows.tolist(), damage.tolist()):
             self.apply_damage(int(row), owner, float(amount), C.ZONE_TORSO, weapon, position, explosive=True)
+
+    # ---- UPLINK ------------------------------------------------------------------------------------------------
+    def _init_uplinks(self) -> None:
+        self.uplink_pos, self.uplink_node = maps.uplink_zones(self.loaded)
+        count = len(self.uplink_pos)
+        self.uplink_owner = np.full(count, -1, dtype=np.int64)          # -1 neutral, else the squad holding it
+        self.uplink_charge = np.zeros(count)                            # -1 fully squad 0 ... +1 fully squad 1
+        self.uplink_contested = np.zeros(count, dtype=bool)
+        self.uplink_present = np.zeros((count, 2), dtype=np.int64)     # living squad members inside
+
+    def uplink_inside(self, rows=None) -> np.ndarray:
+        """``(len(rows), zones)`` mask: which players stand in which uplink."""
+        s = self.store
+        rows = np.flatnonzero(s.active & s.alive) if rows is None else np.atleast_1d(rows)
+        pos = s.move.pos[rows]
+        flat = pos[:, None, :] - self.uplink_pos[None, :, :]
+        horizontal = np.sqrt(flat[..., 0] ** 2 + flat[..., 2] ** 2)
+        return (horizontal < C.UPLINK_RADIUS) & (flat[..., 1] > -1.0) & (flat[..., 1] < C.UPLINK_HEIGHT)
+
+    def _step_uplinks(self) -> None:
+        """Contest, drain, neutralise and capture the uplinks; held uplinks score."""
+        s = self.store
+        rows = np.flatnonzero(s.active & s.alive & (s.team < 2))
+        inside = self.uplink_inside(rows)
+        team = s.team[rows]
+        self.uplink_present[:, 0] = (inside & (team == 0)[:, None]).sum(axis=0)
+        self.uplink_present[:, 1] = (inside & (team == 1)[:, None]).sum(axis=0)
+        n0, n1 = self.uplink_present[:, 0], self.uplink_present[:, 1]
+        self.uplink_contested = (n0 > 0) & (n1 > 0)
+        step = C.TICK_DT / C.UPLINK_CAPTURE_TIME
+
+        def rate(n):
+            return np.where(n > 0, np.minimum(1.0 + 0.5 * (n - 1), 2.0), 0.0)
+
+        owner = self.uplink_owner
+        home = np.where(owner == 0, -1.0, np.where(owner == 1, 1.0, 0.0))
+        idle = (n0 == 0) & (n1 == 0)
+        settle = np.clip(home - self.uplink_charge, -step, step) * np.where(owner >= 0, 1.0, 0.5)
+        push = np.where(self.uplink_contested, 0.0, (rate(n1) - rate(n0)) * step)
+        charge = np.clip(np.where(idle, self.uplink_charge + settle, self.uplink_charge + push), -1.0, 1.0)
+        for zone in range(charge.size):
+            held = int(owner[zone])
+            if (held == 1 and charge[zone] <= 0.0) or (held == 0 and charge[zone] >= 0.0):
+                owner[zone] = -1
+                self.events.append((EV_UPLINK, zone, held, UPLINK_NEUTRALISED))
+            if owner[zone] < 0 and abs(charge[zone]) >= 1.0:
+                side = 1 if charge[zone] > 0.0 else 0
+                owner[zone] = side
+                self.events.append((EV_UPLINK, zone, side, UPLINK_CAPTURED))
+                for row in rows[inside[:, zone] & (team == side)].tolist():
+                    s.score[row] += C.UPLINK_REWARD[0]
+                    self.events.append((EV_REWARD, int(row), C.UPLINK_REWARD[0], C.UPLINK_REWARD[1], REWARD_CAPTURE))
+        self.uplink_charge = charge
+        if self.tick % int(round(C.UPLINK_POINT_INTERVAL * _TICKS)) == 0:
+            for side in (0, 1):
+                self.team_scores[side] += int(np.sum(owner == side))
 
     # ---- ESCALATION ----------------------------------------------------------------------------------------
     def mode_equipment(self, chosen) -> tuple:
@@ -1157,6 +1220,8 @@ class GameWorld:
             for row in due.tolist():
                 self.spawn_player(int(row))
             self.time_left = max(self.time_left - C.TICK_DT, 0.0)
+            if self.mode == C.MODE_UPLINK:
+                self._step_uplinks()
             self._check_match_end()
         elif self.phase == C.PHASE_ENDED and self.tick >= self.intermission_end:
             self.restart_match(self.next_map)
@@ -1165,9 +1230,9 @@ class GameWorld:
 
     # ---- match flow ----------------------------------------------------------------------------------------------
     def leading_side(self) -> int:
-        """Winning team (TDM) or player id (FFA); ``NO_PLAYER`` on a draw / empty server."""
+        """Winning team (team modes) or player id; ``NO_PLAYER`` on a draw / empty server."""
         s = self.store
-        if self.mode == C.MODE_TDM:
+        if C.team_mode(self.mode):
             if self.team_scores[0] == self.team_scores[1]:
                 return NO_PLAYER
             return int(np.argmax(self.team_scores))
@@ -1180,7 +1245,7 @@ class GameWorld:
 
     def _check_match_end(self) -> None:
         s = self.store
-        if self.mode == C.MODE_TDM:
+        if C.team_mode(self.mode):
             reached = int(self.team_scores.max()) >= self.score_limit
         elif self.mode == C.MODE_ESC:
             rows = s.active_rows()
@@ -1195,7 +1260,7 @@ class GameWorld:
         self.intermission_end = self.tick + int(C.INTERMISSION_TIME * _TICKS)
         self.matches_played += 1
         for row in self.humans().tolist():
-            won = (s.team[row] == self.winner) if self.mode == C.MODE_TDM else (row == self.winner)
+            won = (s.team[row] == self.winner) if C.team_mode(self.mode) else (row == self.winner)
             self.events.append((EV_REWARD, int(row), 250, 150, REWARD_MATCH))
             if won:
                 self.events.append((EV_REWARD, int(row), 500, 300, REWARD_WIN))
@@ -1223,6 +1288,9 @@ class GameWorld:
         s.streak_earned[:] = 0
         s.streak_ready[:] = 0
         self.strikes.clear()
+        self.uplink_owner[:] = -1
+        self.uplink_charge[:] = 0.0
+        self.uplink_contested[:] = False
         self.ladder[:] = 0
         if self.mode == C.MODE_ESC:
             for row in s.active_rows().tolist():

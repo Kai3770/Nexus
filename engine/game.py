@@ -42,6 +42,7 @@ from .audio import SoundBank
 from .controller_3d import CameraRig
 from .pacing import QualityGovernor
 from .recap import CombatLog
+from .report import MEDAL_NAMES, MatchReport
 from .menus import MenuManager
 
 STATE_MENU, STATE_CONNECTING, STATE_PLAYING = range(3)
@@ -179,6 +180,9 @@ class NexusGame:
         self.strikes: list = []                   # marked orbital lances: [position, impact time, owner]
         self.pings = np.full(C.MAX_PLAYERS, -100.0)   # when each player last fired (minimap pings)
         self.alert_end = 0.0
+        self.uplink_pos = None                    # UPLINK zone positions of the loaded arena
+        self.report = MatchReport()               # this match's stats and medals
+        self.report_text = ""
         self.orbit = 0.0
         self.last_corrections = 0
         self.backdrop_map = ""
@@ -363,6 +367,9 @@ class NexusGame:
             else:
                 self.menus.notify(note, 6.0)
         self.menus.update(dt)
+        if not self.in_match():
+            for title, text, credits in self.pm.pop_notices():
+                self.menus.notify("%s  -  %s  +%s CR" % (title, text, SS.format_number(credits)), 6.0)
         if self.state == STATE_MENU:
             self._update_backdrop(dt)
             return
@@ -440,6 +447,7 @@ class NexusGame:
         self.backdrop_map = data.key
         rgba, bounds = maps.minimap_image(data)
         self.hud.set_minimap(rgba, bounds)
+        self.uplink_pos, _ = maps.uplink_zones(client.loaded)
         self.grenades.clear()
         self.zone_fx.clear()
         self._reset_rewards()
@@ -622,6 +630,7 @@ class NexusGame:
                        float(self.rng.uniform(-1.0, 1.0)) * float(ws.recoil_yaw[0, slot]) * steady,
                        1.0 + min(heavy, 120.0) / 60.0)
         self.pm.record("shots")
+        self.report.shot()
 
     # ================================================================== #
     #  Server events -> feedback
@@ -632,12 +641,14 @@ class NexusGame:
         self.pings[:] = -100.0
         self.combat.reset()
         self.alert_end = 0.0
+        self.report.reset()
+        self.report_text = ""
         self.hud.set_recap("")
         self.hud.set_alert("")
 
     def _friendly(self, pid: int) -> bool:
         client = self.client
-        return client.mode == C.MODE_TDM and 0 <= pid < C.MAX_PLAYERS and int(client.view.team[pid]) == int(client.team)
+        return C.team_mode(client.mode) and 0 <= pid < C.MAX_PLAYERS and int(client.view.team[pid]) == int(client.team)
 
     def _set_alert(self, text: str, rgb, seconds: float) -> None:
         self.hud.set_alert(text, rgb)
@@ -673,6 +684,8 @@ class NexusGame:
                 self._show_banner("%s READY" % name, "press X", R.HUD_GOLD, 2.4)
                 audio.play("streak_ready", 0.8)
         elif action == S.STREAK_USED:
+            if mine:
+                self.pm.record("rewards_used")
             if reward == ST.LANCE:
                 self.strikes.append([position, self.clock + float(ST.DURATION[ST.LANCE]), pid])
                 hud.push_kill("%s  called in %s" % (self._name(pid), name), R.HUD_GOLD if friendly else R.HUD_CRIMSON)
@@ -751,6 +764,92 @@ class NexusGame:
             self.alert_end = 0.0
             hud.set_alert("")
 
+    def _on_uplink(self, event: tuple) -> None:
+        """A zone changed hands: feed line and sound from your squad's point of view."""
+        _, zone, team, action = event
+        client, hud, audio = self.client, self.hud, self.audio
+        mine = int(team) == int(client.team) % 2
+        name = C.UPLINK_NAMES[zone % len(C.UPLINK_NAMES)]
+        squad = C.TEAM_NAMES[team % 2]
+        rgb = tuple(float(v) for v in C.TEAM_COLORS[team % 2])
+        if action == S.UPLINK_CAPTURED:
+            hud.push_kill("%s  captured uplink %s" % (squad, name), rgb)
+            audio.play("uplink_captured" if mine else "uplink_lost", 0.8 if mine else 0.5)
+        else:
+            hud.push_kill("%s  lost uplink %s" % (squad, name), R.HUD_DIM)
+            if mine:
+                audio.play("uplink_lost", 0.7)
+
+    def _update_uplinks(self, dt: float, alive: bool) -> None:
+        """UPLINK: zone strip, capture bar, labels over the zones, minimap discs and the zones' glow."""
+        client, hud, scene, rig = self.client, self.hud, self.scene, self.rig
+        if client.mode != C.MODE_UPLINK or self.uplink_pos is None:
+            hud.set_uplink_strip(None)
+            hud.set_uplink_markers(())
+            hud.set_uplink_capture("")
+            hud.set_radar_zones()
+            return
+        team = int(client.team) % 2
+        own = tuple(float(v) for v in C.TEAM_COLORS[team])
+        enemy = tuple(float(v) for v in C.TEAM_COLORS[1 - team])
+        flash = 0.5 + 0.5 * math.sin(self.clock * 10.0)
+        colors = []
+        for zone in range(len(self.uplink_pos)):
+            holder = int(client.uplink_owner[zone])
+            rgb = np.array(own if holder == team else (enemy if holder == 1 - team else (0.86, 0.89, 0.94)))
+            if client.uplink_contested[zone]:
+                rgb = rgb * (1.0 - flash) + np.array(R.HUD_GOLD) * flash
+            colors.append(tuple(float(v) for v in rgb))
+        hud.set_uplink_strip(colors)
+        hud.set_radar_zones(self.uplink_pos, [rgb + (0.55,) for rgb in colors])
+        forward = M.forward_vector(rig.cam_yaw, rig.cam_pitch)
+        right, up = M.right_vector(rig.cam_yaw), M.up_vector(rig.cam_yaw, rig.cam_pitch)
+        tan_h = math.tan(math.radians(camera.fov) * 0.5)
+        tan_v = math.tan(math.radians(R.vertical_fov(camera.fov)) * 0.5)
+        own_pos = client.predictor.render_position()
+        markers = []
+        for zone, position in enumerate(self.uplink_pos):
+            anchor = position + np.array([0.0, 2.4, 0.0]) - rig.cam_pos
+            depth = float(anchor @ forward)
+            x = float(anchor @ right) / max(depth * tan_h, 1.0e-6) * hud.half_width
+            y = float(anchor @ up) / max(depth * tan_v, 1.0e-6) * 0.5
+            if depth < 0.5 or abs(x) > hud.half_width * 0.97 or abs(y) > 0.47:
+                markers.append(None)
+                continue
+            metres = float(np.linalg.norm(position - own_pos))
+            markers.append((x, y, "%s  %dm" % (C.UPLINK_NAMES[zone], round(metres)), colors[zone]))
+        hud.set_uplink_markers(markers)
+        flat = own_pos - self.uplink_pos
+        inside = ((np.hypot(flat[:, 0], flat[:, 2]) < C.UPLINK_RADIUS) & (flat[:, 1] > -1.0)
+                  & (flat[:, 1] < C.UPLINK_HEIGHT))
+        if alive and inside.any():
+            zone = int(np.argmax(inside))
+            name = C.UPLINK_NAMES[zone]
+            mine = float(client.uplink_charge[zone]) * (1.0 if team == 1 else -1.0)
+            if client.uplink_contested[zone]:
+                text = "%s  CONTESTED" % name
+            elif int(client.uplink_owner[zone]) == team:
+                text = "%s  SECURED" % name
+            else:
+                text = ("NEUTRALISING  %s" if mine < 0.0 else "CAPTURING  %s") % name
+            hud.set_uplink_capture(text, mine, own, enemy)
+        else:
+            hud.set_uplink_capture("")
+        for zone, position in enumerate(self.uplink_pos):
+            scene.fx_uplink(position, colors[zone], dt, bool(client.uplink_contested[zone]))
+
+    def _medals(self, keys) -> None:
+        """Medal popups: a gold line in the reward feed, a chime, XP and the profile statistic."""
+        for key in keys:
+            self.hud.push_reward("MEDAL  %s" % MEDAL_NAMES[key])
+            self.audio.play("medal", 0.7)
+            self.pm.record("medals")
+            _, levels = self.pm.apply_reward(0, C.MEDAL_XP)
+            self.report.reward(0, C.MEDAL_XP)
+            if levels:
+                self._show_banner("LEVEL %d" % self.pm.profile.level, "level up bonus credited", R.HUD_GOLD, 3.0)
+                self.audio.play("level_up", 0.8)
+
     def _show_banner(self, text: str, sub: str, rgb, ttl: float) -> None:
         self.banner, self.banner_sub, self.banner_rgb, self.banner_ttl = text, sub, rgb, ttl
 
@@ -807,6 +906,7 @@ class NexusGame:
             self.pm.record("hits")
             self.pm.record("damage", damage)
             self.combat.gave(victim, damage)
+            self._medals(self.report.hit(damage, headshot))
         elif kind == S.EV_DAMAGE:
             _, attacker, damage, _zone, source = event
             strength = min(damage / 40.0, 1.5)
@@ -834,6 +934,8 @@ class NexusGame:
                 tag = "HEADSHOT  " if flags & S.KILL_HEADSHOT else ""
                 line = "%s  [%s%s]  %s" % (self._name(killer), tag, weapon_name, self._name(victim))
             mine = me in (killer, victim)
+            self._medals(self.report.kill(killer, victim, me, self.clock, bool(flags & S.KILL_EXPLOSIVE),
+                                          ST.is_streak_kill(weapon), bool(flags & S.KILL_SUICIDE)))
             hud.push_kill(line, R.HUD_CRIMSON if flags & S.KILL_HEADSHOT else (R.HUD_GOLD if mine else R.HUD_WHITE))
             if 0 <= victim < C.MAX_PLAYERS and victim != me and client.view.active[victim]:
                 scene.fx_death(client.view.pos[victim], self._team_color(victim))
@@ -849,7 +951,7 @@ class NexusGame:
                 self.pm.record("best_streak", self.streak, maximum=True)
                 if flags & S.KILL_HEADSHOT:
                     self.pm.record("headshots")
-                if flags & S.KILL_EXPLOSIVE:
+                if flags & S.KILL_EXPLOSIVE and not ST.is_streak_kill(weapon):
                     self.pm.record("grenade_kills")
                 audio.play("kill", 0.8)
         elif kind == S.EV_SPAWN:
@@ -941,9 +1043,15 @@ class NexusGame:
             self._on_ladder(event)
         elif kind == S.EV_STREAK:
             self._on_streak(event)
+        elif kind == S.EV_UPLINK:
+            self._on_uplink(event)
         elif kind == S.EV_REWARD:
             _, credits, xp, reason = event
             granted, levels = self.pm.apply_reward(credits, xp)
+            self.report.reward(granted, xp)
+            if reason == S.REWARD_CAPTURE:
+                self.pm.record("captures")
+                self._medals(self.report.capture())
             hud.push_reward("+%s  %s" % (SS.format_number(granted), S.REWARD_NAMES[reason % len(S.REWARD_NAMES)]))
             if levels:
                 self._show_banner("LEVEL %d" % self.pm.profile.level, "level up bonus credited", R.HUD_GOLD, 3.0)
@@ -954,9 +1062,13 @@ class NexusGame:
                 if winner == S.NO_PLAYER:
                     self.result, won = "DRAW", False
                 else:
-                    won = (winner == client.team) if mode == C.MODE_TDM else (winner == me)
+                    won = (winner == client.team) if C.team_mode(mode) else (winner == me)
                     self.result = "VICTORY" if won else "DEFEAT"
                 self.result_sub = "next match starts in %d seconds" % int(C.INTERMISSION_TIME)
+                best = max(client.roster.values(), key=lambda e: (e.score, e.kills), default=None)
+                self._medals(self.report.finish(best.pid if best is not None and best.score > 0 else -1, me))
+                self.report_text = self.report.summary(best.name if best is not None else "",
+                                                       best.score if best is not None else 0, mode == C.MODE_UPLINK)
                 self.pm.record("matches")
                 if won:
                     self.pm.record("wins")
@@ -965,6 +1077,8 @@ class NexusGame:
             else:
                 self.result = ""
                 self.death_note = ""
+                self.report.reset()
+                self.report_text = ""
                 if mode == C.MODE_ESC:
                     self._show_banner(C.MODE_NAMES[mode], "climb %d guns  -  first up: %s" % (
                         W.ESCALATION_STEPS, W.WEAPON_NAMES[W.escalation_weapon(0)]), R.HUD_GOLD, 3.0)
@@ -991,6 +1105,11 @@ class NexusGame:
         hud.set_equipment(EQ.EQUIP_NAMES[int(store.equip[0, 0])], 1.0 - min(max(lethal_left, 0.0), 1.0),
                           EQ.EQUIP_NAMES[int(store.equip[0, 1])], 1.0 - min(max(tactical_left, 0.0), 1.0))
         self._update_rewards(dt, store)
+        self._update_uplinks(dt, alive)
+        for title, text, credits in self.pm.pop_notices():
+            hud.push_reward("%s  +%s CR" % (title, SS.format_number(credits)))
+            self.audio.play("contract", 0.8)
+            self._show_banner(title, text, R.HUD_GOLD, 2.6)
         own = client.roster.get(client.pid)
         if client.mode == C.MODE_ESC:
             leader = max(client.roster.values(), key=lambda e: (e.score, e.kills), default=None)
@@ -1003,12 +1122,13 @@ class NexusGame:
                           client.score_limit)
         ended = client.phase == C.PHASE_ENDED
         show_board = ended or bool(held_keys["tab"])
+        hud.set_report(self.report_text if ended else None)
         if show_board:
-            entries = sorted(client.roster.values(), key=lambda e: (e.team if client.mode == C.MODE_TDM else 0, -e.score, -e.kills))
+            entries = sorted(client.roster.values(), key=lambda e: (e.team if C.team_mode(client.mode) else 0, -e.score, -e.kills))
             rows = []
             for entry in entries:
                 tag = "* " if entry.pid == client.pid else "  "
-                side = ("%s  " % C.TEAM_NAMES[entry.team % 2]) if client.mode == C.MODE_TDM and entry.team < 2 else ""
+                side = ("%s  " % C.TEAM_NAMES[entry.team % 2]) if C.team_mode(client.mode) and entry.team < 2 else ""
                 score = min(entry.score + 1, client.score_limit) if client.mode == C.MODE_ESC else entry.score
                 rows.append(("%s%s%s" % (side, entry.name, "  (bot)" if entry.bot else ""), entry.kills, entry.deaths,
                              score, entry.ping, tag))

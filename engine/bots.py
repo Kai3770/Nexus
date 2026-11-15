@@ -138,6 +138,21 @@ class BotController:
         self.visible[rows] = seen
 
     # ---- decision step ----------------------------------------------------------------------
+    def _uplink_wanted(self, rows) -> np.ndarray:
+        """``(bots, zones)``: uplinks a bot's squad does not hold, or holds but must defend right now."""
+        game = self.game
+        team = game.store.team[rows]
+        return (game.uplink_owner[None, :] != team[:, None]) | game.uplink_contested[None, :]
+
+    def _uplink_goal(self, rows, pos, wanted) -> np.ndarray:
+        """Navigation node of the uplink each bot should head for: a wanted one, its own preferred one first,
+        else the nearest; with everything held it guards its preferred uplink."""
+        game = self.game
+        zones = game.uplink_pos
+        dist = np.linalg.norm(pos[:, None, :][..., [0, 2]] - zones[None, :, [0, 2]], axis=2)
+        score = dist - 12.0 * _spread(game.store.team[rows], len(zones)) + np.where(wanted, 0.0, 1.0e4)
+        return game.uplink_node[np.argmin(score, axis=1)]
+
     def think(self, rows):
         """
         Commands for the bots in ``rows`` for this tick.
@@ -192,9 +207,17 @@ class BotController:
         # ---- goal node -------------------------------------------------------------------------
         if nav.count:
             chase = has_target | hunting
+            uplink = game.mode == C.MODE_UPLINK and bool(np.all(game.uplink_node >= 0))
+            if uplink:                                              # the objective beats a remembered enemy
+                wanted = self._uplink_wanted(rows)
+                holding = (game.uplink_inside(rows) & wanted).any(axis=1)
+                chase = has_target & ~holding                       # fight from the uplink, never wander off it
             chase_node = nav.nearest(self.last_seen[rows])
             expired = (self.goal_until[rows] <= tick) & ~chase
             wander = rng.integers(0, nav.count, k)
+            if uplink:
+                wander = self._uplink_goal(rows, pos, wanted)       # off to an uplink whenever not fighting
+                expired = ~chase
             goal = np.where(chase, chase_node, np.where(expired, wander, self.goal_node[rows]))
             self.goal_until[rows] = np.where(expired, tick + rng.integers(6, 14, k) * C.TICK_RATE, self.goal_until[rows])
             self.goal_node[rows] = goal
@@ -336,6 +359,22 @@ class BotController:
         buttons |= np.where(reward, C.BTN_STREAK, 0).astype(np.uint16)
         buttons = np.where(alive, buttons, 0).astype(np.uint16)
         return buttons, aim_yaw, aim_pitch
+
+
+def _spread(team, count: int) -> np.ndarray:
+    """
+    ``(len(team), count)`` mask: the uplink each bot prefers, so a squad
+    splits over them.  The k-th bot of a squad prefers its home uplink, the
+    centre, the far one, home again ... -- mirrored for the two squads (A is
+    squad 0's home, C squad 1's), so neither squad is favoured.
+    """
+    team = np.asarray(team)
+    rank = np.zeros(team.size, dtype=np.int64)
+    for side in (0, 1):
+        members = np.flatnonzero(team == side)
+        rank[members] = np.arange(members.size)
+    pick = np.where(team == 0, rank % count, (count - 1) - rank % count)
+    return pick[:, None] == np.arange(count)[None, :]
 
 
 def run_bot_match(map_key="crucible", bots: int = 8, ticks: int = 3600, difficulty: int = 1,

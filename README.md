@@ -20,6 +20,7 @@ python main.py
 | --- | --- |
 | `python main.py --solo terminal --mode ffa --bots 5` | Jump straight into a solo match |
 | `python main.py --solo crucible --mode esc` | ESCALATION: climb the ladder of all 29 guns |
+| `python main.py --solo datacore --mode uplink` | UPLINK: two squads fight over three zones |
 | `python main.py --host datacore` | Host a LAN match (advertised automatically) and join it |
 | `python main.py --connect 10.0.0.7` | Join by address (normally not needed, see the LAN lobby) |
 | `python main.py --quality 1 --fps-limit 60` | Override the saved graphics settings for one run |
@@ -38,8 +39,25 @@ beacon to `255.255.255.255:28015` once per second. Everybody else opens **JOIN L
 clicks the match. Gameplay traffic uses UDP 28016 (the next free port if that one is taken), so
 allow UDP 28015 and 28016 through the local firewall.
 
-Modes: Team Deathmatch (VANTA vs HELIX), Free For All and ESCALATION on five arenas (DATACORE,
+Modes: Team Deathmatch (VANTA vs HELIX), Free For All, ESCALATION and UPLINK on five arenas (DATACORE,
 SKYBRIDGE, CRUCIBLE, TERMINAL, ATRIUM). The server tops the match up with bots (three difficulty levels).
+
+## UPLINK
+
+Two squads fight over three zones, A on VANTA's side, B in the centre and C on HELIX's side. They are
+derived from every arena's data -- the midpoint of the two squads' spawn areas and the points halfway
+towards each squad, snapped to the navigation graph, with B chosen so it is as far from A as from C -- so
+every arena, JSON drop-ins included, supports the mode without extra data.
+
+Standing in a zone with no enemy present swings it towards your squad: one player needs 6 seconds, two
+4, three or more 3. An enemy zone is neutralised first and then captured; with both squads inside it is
+contested and does not move. Empty zones settle back (held ones recharge, neutral ones drain). Every held
+zone scores a point every 2 seconds, first to 150 wins; kills score nothing, captures pay 150 credits and
+75 XP to every capturer. The HUD shows the zones under the score in their holders' colours, labels with
+the distance over each zone, a capture bar while you stand in one and the zones on the minimap. Bots play
+the objective: they head for zones their squad does not hold, fight from inside a zone instead of chasing,
+and split over the zones in mirror image for the two squads. Tunables are the `UPLINK_*` constants in
+`engine/config.py`.
 
 ## ESCALATION
 
@@ -213,6 +231,21 @@ ducked.
 
 A host can run a level playing field with `dedicated_server.py --no-upgrades`.
 
+### Medals, match report and contracts
+
+Twelve medals are earned during a match and pop up in the reward feed (+50 XP each): FIRST STRIKE, DOUBLE
+DOWN and TRIPLE THREAT (eliminations within 4 s of each other), IRON WILL and OVERDRIVE (5 and 10 without
+dying), PAYBACK, HEADHUNTER (5 headshots), DEMOLITION (3 equipment eliminations), STARFALL (an ORBITAL LANCE
+elimination), UPLINKER (3 captures), SHARPSHOOTER (half of at least 30 shots hit) and MVP. When the match
+ends a **match report** appears next to the scoreboard: the MVP, eliminations, deaths, K/D, accuracy,
+headshots, best streak, damage, captures, the credits and XP earned and the medals (`engine/report.py`).
+
+**Contracts** (main menu): three daily contracts and one weekly contract, picked from ten kinds by the UTC
+date so everybody gets the same ones on the same day -- eliminations, headshots, wins, matches, damage,
+equipment eliminations, uplink captures, medals, scorestreak rewards used, hits. Progress counts what the
+profile records; a finished contract pays 2,500 (daily) or 15,000 credits (weekly) at once. They live in the
+signed save (`CONTRACT_TABLE` in `engine/config.py`).
+
 ## Layout
 
 | File | Contents |
@@ -228,6 +261,7 @@ A host can run a level playing field with `dedicated_server.py --no-upgrades`.
 | `engine/simulation.py`, `engine/weapons.py`, `engine/bots.py` | Shared deterministic simulation, weapon state machine and balance model, bot AI |
 | `engine/equipment.py` | Lethal / tactical equipment table, per-kind helpers and balance rules |
 | `engine/streaks.py`, `engine/recap.py` | Scorestreak reward table and helpers; the death recap's combat log |
+| `engine/report.py` | Medals and the match report |
 | `engine/game.py`, `engine/menus.py`, `engine/audio.py` | Client loop, front end, synthesised sound and the mixer |
 | `engine/mathx.py`, `engine/crypto.py` | Vector / quaternion math, stream cipher |
 
@@ -269,7 +303,7 @@ python -m pytest tests -q
 python tests/run_all.py
 ```
 
-The second command needs no pytest. 140 tests cover the math, the octree against a brute-force
+The second command needs no pytest. 158 tests cover the math, the octree against a brute-force
 reference, movement, weapons and the balance model, the simulation, all arenas and the injector
 (run-time registration, JSON drop-ins, malformed definitions, checksums), navigation on every
 storey, bot-only matches, the save system, wire codecs, rollback, live client / server sessions
@@ -279,7 +313,10 @@ stims, respawn-time class changes), the ESCALATION ladder (climbing, stolen step
 kills twice, the winner, a live session in which the client predicts with the gun the server hands out,
 bot matches), every scorestreak reward (earning per life, the X key, the shield soaking damage, the scan's
 reach, the lance's warning time, falloff and squad immunity, a live session raising the shield, bots using
-them), the minimap of every arena, the death recap, procedural materials, light baking, dynamic resolution,
+them), the minimap of every arena, the death recap, UPLINK (fair zones on every arena, capture times,
+contesting, neutralising, scoring, bots spreading over the zones, the zone state in snapshots and a live
+session), every medal and the match report, contracts (calendar rotation, payout, the signed save),
+procedural materials, light baking, dynamic resolution,
 camera springs at 10 fps, a client
 that stalls while baking, and two rendered end-to-end runs
 (under `xvfb-run` when there is no display; skipped if neither exists).

@@ -19,8 +19,11 @@ gespeicherte Fortschritt; `README.md` beschreibt das Spiel selbst.
 | Spielmodi | TEAM DEATHMATCH, FREE FOR ALL und neu ESCALATION: Waffenleiter über alle 29 Waffen (`config.ESCALATION_LADDER`), jeder Waffen-Kill gibt die nächste Waffe, ein Kill mit der letzten gewinnt, Beil-Kills stehlen eine Stufe, Selbst-Kills kosten eine; `weapons.validate_escalation()` leer |
 | Scorestreaks | PULSE SCAN (3 Kills, Gegner auf der Minimap), AEGIS SHIELD (5 Kills, 50er Überschild), ORBITAL LANCE (7 Kills, Schlag mit 2 s Vorwarnung); einmal pro Leben verdient, bleiben über den Tod hinaus, Einsatz mit X; nicht in ESCALATION; Bots nutzen sie; `streaks.validate_streaks()` leer |
 | Minimap und Death-Recap | Minimap aus der Arena-Geometrie gerastert (eigene Position, Trupp, Schuss-Pings, Scan, Lance-Gefahrenzone); Recap beim Tod: Waffe, Entfernung, Trefferbilanz, Restleben des Gegners |
-| Netcode | Owner-State überträgt das komplette Loadout (Waffen + Upgrade-Stufen) und den Streak-Zustand, Snapshots den Schild; Protokoll-Version 13 |
-| Tests | 140 bestanden (`python -m pytest tests -q` und `python tests/run_all.py`), davon 2 gerenderte Läufe unter xvfb |
+| UPLINK | Zonen-Modus mit drei Zonen pro Arena, automatisch und symmetrisch aus den Kartendaten abgeleitet; Erobern (6/4/3 s), Neutralisieren, Umkämpft, Punkte pro gehaltener Zone, Grenze 150; Bots spielen auf Ziele und verteilen sich spiegelbildlich; HUD-Zonenleiste, Markierungen mit Entfernung, Erobern-Balken, Minimap |
+| Match-Report und Medaillen | 12 Medaillen mit Popups (+50 XP), Report mit MVP, Bilanz, Trefferquote, Credits/XP und Medaillen neben dem Scoreboard |
+| Aufträge | 3 tägliche und 1 wöchentlicher Auftrag aus 10 Arten nach UTC-Datum, Fortschritt über die Profil-Statistik, Auszahlung 2.500 / 15.000 Credits, im signierten Spielstand; Menü CONTRACTS |
+| Netcode | Owner-State überträgt das komplette Loadout (Waffen + Upgrade-Stufen) und den Streak-Zustand, Snapshots den Schild und den Zonenzustand; Protokoll-Version 14 |
+| Tests | 158 bestanden (`python -m pytest tests -q` und `python tests/run_all.py`), davon 2 gerenderte Läufe unter xvfb |
 
 ## Messwerte (Container ohne GPU, Mesa llvmpipe, 1280x720, 8 Spieler, Listen-Server im selben Prozess)
 

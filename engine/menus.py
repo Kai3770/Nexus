@@ -107,10 +107,11 @@ class MainScreen(Screen):
         self.label("LAN ARENA SHOOTER  //  INCREMENTAL CORPORATE WARFARE", 0.0, 0.295, 0.85, (0, 0), COL_DIM)
         entries = (("PLAY SOLO", lambda: self.menu.open_setup(False)), ("HOST LAN GAME", lambda: self.menu.open_setup(True)),
                    ("JOIN LAN GAME", lambda: self.menu.show("lobby")), ("ARMORY", lambda: self.menu.show("armory")),
-                   ("EQUIPMENT", lambda: self.menu.show("equipment")), ("SPONSORS", lambda: self.menu.show("sponsors")),
-                   ("SETTINGS", lambda: self.menu.show("settings")), ("QUIT", self.game.quit))
+                   ("EQUIPMENT", lambda: self.menu.show("equipment")), ("CONTRACTS", lambda: self.menu.show("contracts")),
+                   ("SPONSORS", lambda: self.menu.show("sponsors")), ("SETTINGS", lambda: self.menu.show("settings")),
+                   ("QUIT", self.game.quit))
         for index, (text, action) in enumerate(entries):
-            self.button(text, -0.42, 0.17 - index * 0.068, 0.36, 0.056, action, COL_DANGER if text == "QUIT" else COL_BUTTON, 1.0)
+            self.button(text, -0.42, 0.18 - index * 0.064, 0.36, 0.052, action, COL_DANGER if text == "QUIT" else COL_BUTTON, 1.0)
         self.panel(0.30, -0.065, 0.66, 0.50)
         self.name_text = self.label("", 0.0, 0.145, 1.5)
         self.level_text = self.label("", 0.0, 0.095, 0.95, rgb=COL_DIM)
@@ -135,6 +136,45 @@ class MainScreen(Screen):
         self.set_text(self.record_text, "ELIMINATIONS %d    DEATHS %d    HEADSHOTS %d    MATCHES %d    WINS %d" % (
             stats["kills"], stats["deaths"], stats["headshots"], stats["matches"], stats["wins"]))
         self.set_text(self.notice_text, self.menu.notice)
+
+
+def _duration(seconds: float) -> str:
+    seconds = max(int(seconds), 0)
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    return ("%d d %d h" % (days, hours)) if days else ("%d h %d min" % (hours, rest // 60))
+
+
+# =========================================================================== #
+#  Contracts
+# =========================================================================== #
+class ContractsScreen(Screen):
+    """Three daily contracts and one weekly contract; finished ones pay out at once."""
+    title = "CONTRACTS"
+
+    def build(self) -> None:
+        self.panel(0.0, 0.02, 1.24, 0.60)
+        self.rows = []
+        for index in range(C.DAILY_CONTRACTS + 1):
+            y = 0.24 - index * 0.115
+            self.rows.append((self.label("", -0.58, y + 0.024, 0.72, rgb=COL_DIM), self.label("", -0.58, y - 0.014, 1.0),
+                              self.label("", 0.28, y, 1.0, (0, 0)), self.label("", 0.58, y, 0.95, (0.5, 0), COL_GOLD)))
+        self.footer = self.label("", 0.0, -0.245, 0.75, (0, 0), COL_DIM)
+        self.back_button()
+
+    def refresh(self) -> None:
+        rows = self.pm.contract_rows()
+        for widgets, row in zip(self.rows, rows):
+            scope, text, progress, reward = widgets
+            self.set_text(scope, row["scope"])
+            self.set_text(text, row["text"])
+            self.set_text(progress, "DONE" if row["done"] else "%s / %s" % (
+                "{:,}".format(int(row["progress"])), "{:,}".format(int(row["target"]))))
+            progress.color = _c((0.35, 0.95, 0.55) if row["done"] else COL_TEXT)
+            self.set_text(reward, money(row["reward"]))
+        daily, weekly = self.pm.contract_resets()
+        self.set_text(self.footer, "daily contracts renew in %s   //   the weekly contract in %s" % (
+            _duration(daily), _duration(weekly)))
 
 
 # =========================================================================== #
@@ -690,7 +730,7 @@ class MenuManager:
         self.screens = {
             "main": MainScreen(self), "setup": SetupScreen(self), "lobby": LobbyScreen(self),
             "armory": ArmoryScreen(self), "equipment": EquipmentScreen(self), "sponsors": SponsorScreen(self),
-            "settings": SettingsScreen(self),
+            "settings": SettingsScreen(self), "contracts": ContractsScreen(self),
             "connecting": ConnectingScreen(self), "pause": PauseScreen(self),
         }
         self.current = None
