@@ -36,10 +36,12 @@ from . import network_lan as N
 from . import renderer as R
 from . import secure_save as SS
 from . import simulation as S
+from . import streaks as ST
 from . import weapons as W
 from .audio import SoundBank
 from .controller_3d import CameraRig
 from .pacing import QualityGovernor
+from .recap import CombatLog
 from .menus import MenuManager
 
 STATE_MENU, STATE_CONNECTING, STATE_PLAYING = range(3)
@@ -52,14 +54,14 @@ _TRACER_BY_CLASS = {0: (1.0, 0.84, 0.48, 1.0), 1: (1.0, 0.9, 0.58, 0.9), 2: (1.0
 TRACER_COLORS = tuple(_TRACER_TUNED[i] if i < len(_TRACER_TUNED) else _TRACER_BY_CLASS[int(W.WEAPONS["klass"][i])]
                       for i in range(W.WEAPON_COUNT))
 KEY_LATCH = {"space": C.BTN_JUMP, "left mouse down": C.BTN_SHOOT, "c": C.BTN_SLIDE, "left control": C.BTN_SLIDE,
-             "r": C.BTN_RELOAD, "q": C.BTN_SWAP, "g": C.BTN_ABILITY, "f": C.BTN_TACTICAL, "scroll up": C.BTN_SWAP,
+             "r": C.BTN_RELOAD, "q": C.BTN_SWAP, "g": C.BTN_ABILITY, "f": C.BTN_TACTICAL, "x": C.BTN_STREAK, "scroll up": C.BTN_SWAP,
              "scroll down": C.BTN_SWAP}
 HELD_BUTTONS = (("w", C.BTN_FORWARD), ("s", C.BTN_BACK), ("a", C.BTN_LEFT), ("d", C.BTN_RIGHT), ("space", C.BTN_JUMP),
                 ("left shift", C.BTN_SPRINT), ("left control", C.BTN_SLIDE), ("c", C.BTN_SLIDE),
                 ("left mouse", C.BTN_SHOOT), ("right mouse", C.BTN_ADS), ("r", C.BTN_RELOAD), ("q", C.BTN_SWAP),
-                ("g", C.BTN_ABILITY), ("f", C.BTN_TACTICAL))
+                ("g", C.BTN_ABILITY), ("f", C.BTN_TACTICAL), ("x", C.BTN_STREAK))
 CONTROL_HINT = ("WASD move   SHIFT sprint   C slide   SPACE jump   LMB fire   RMB aim   G lethal   F tactical   R reload   "
-                "Q swap   TAB scores")
+                "Q swap   X streak   TAB scores")
 
 
 class AutoPilot:
@@ -121,6 +123,8 @@ class AutoPilot:
                 buttons |= C.BTN_TACTICAL
             if int(store.weapons.ammo[0, int(store.weapons.slot[0])]) * 2 < int(store.weapons.current("mag", 0)[0]):
                 buttons |= C.BTN_RELOAD if self.timer % 30 == 0 else 0
+        if int(store.streak_ready[0]) and self.timer % 90 == 45:
+            buttons |= C.BTN_STREAK
         return buttons, yaw, pitch
 
 
@@ -171,6 +175,10 @@ class NexusGame:
         self.banner_rgb = R.HUD_GOLD
         self.banner_ttl = 0.0
         self.death_note = ""
+        self.combat = CombatLog()                 # damage taken and dealt this life (death recap)
+        self.strikes: list = []                   # marked orbital lances: [position, impact time, owner]
+        self.pings = np.full(C.MAX_PLAYERS, -100.0)   # when each player last fired (minimap pings)
+        self.alert_end = 0.0
         self.orbit = 0.0
         self.last_corrections = 0
         self.backdrop_map = ""
@@ -294,6 +302,7 @@ class NexusGame:
             self.server = None
         self.grenades.clear()
         self.zone_fx.clear()
+        self._reset_rewards()
         self.stun_end = 0.0
 
     def quit(self) -> None:
@@ -413,6 +422,7 @@ class NexusGame:
         self.accumulator = 0.0
         self.grenades.clear()
         self.zone_fx.clear()
+        self._reset_rewards()
         self.stun_end = 0.0
         store = self.client.predictor.store
         self.prev_pos = store.move.pos[0].copy()
@@ -428,8 +438,11 @@ class NexusGame:
         data = client.loaded.data
         self.scene.load_map(data)
         self.backdrop_map = data.key
+        rgba, bounds = maps.minimap_image(data)
+        self.hud.set_minimap(rgba, bounds)
         self.grenades.clear()
         self.zone_fx.clear()
+        self._reset_rewards()
         self.stun_end = 0.0
         self.result = ""
 
@@ -613,6 +626,131 @@ class NexusGame:
     # ================================================================== #
     #  Server events -> feedback
     # ================================================================== #
+    def _reset_rewards(self) -> None:
+        """Forget lance marks, minimap pings, the combat log and alerts (new map, match or session)."""
+        self.strikes.clear()
+        self.pings[:] = -100.0
+        self.combat.reset()
+        self.alert_end = 0.0
+        self.hud.set_recap("")
+        self.hud.set_alert("")
+
+    def _friendly(self, pid: int) -> bool:
+        client = self.client
+        return client.mode == C.MODE_TDM and 0 <= pid < C.MAX_PLAYERS and int(client.view.team[pid]) == int(client.team)
+
+    def _set_alert(self, text: str, rgb, seconds: float) -> None:
+        self.hud.set_alert(text, rgb)
+        self.alert_end = self.clock + seconds
+
+    def _death_recap(self, killer: int, weapon: int, weapon_name: str, flags: int) -> None:
+        """Who, with what, from how far, and how the exchange went (shown while dead)."""
+        client = self.client
+        if flags & S.KILL_SUICIDE:
+            own = killer == client.pid and C.EQUIP_KILL_BASE <= weapon < C.EQUIP_KILL_BASE + EQ.EQUIP_COUNT
+            self.hud.set_recap(self.combat.recap(-1, "", ("your own %s" % weapon_name) if own else "the fall",
+                                                 suicide=True))
+            return
+        known = 0 <= killer < C.MAX_PLAYERS and bool(client.view.active[killer])
+        distance = float(np.linalg.norm(client.view.pos[killer] - client.predictor.store.move.pos[0])) if known else None
+        health = float(client.view.health[killer]) if known and client.view.alive[killer] else None
+        self.hud.set_recap(self.combat.recap(killer, self._name(killer), weapon_name, distance, health,
+                                             bool(flags & S.KILL_HEADSHOT)))
+
+    def _on_streak(self, event: tuple) -> None:
+        """Scorestreak news: rewards ready, used, the lance landing, a shield shot away."""
+        _, pid, reward, action, position = event
+        client, hud, audio, scene, rig = self.client, self.hud, self.audio, self.scene, self.rig
+        me = client.pid
+        reward %= ST.STREAK_COUNT
+        name = ST.STREAK_NAMES[reward]
+        position = np.asarray(position, dtype=np.float64)
+        mine = pid == me
+        friendly = mine or self._friendly(pid)
+        _, right, _ = self._camera_basis()
+        if action == S.STREAK_EARNED:
+            if mine:
+                self._show_banner("%s READY" % name, "press X", R.HUD_GOLD, 2.4)
+                audio.play("streak_ready", 0.8)
+        elif action == S.STREAK_USED:
+            if reward == ST.LANCE:
+                self.strikes.append([position, self.clock + float(ST.DURATION[ST.LANCE]), pid])
+                hud.push_kill("%s  called in %s" % (self._name(pid), name), R.HUD_GOLD if friendly else R.HUD_CRIMSON)
+                audio.play_at("lance_mark", position, rig.cam_pos, right)
+            elif reward == ST.SCAN:
+                if friendly:
+                    hud.push_kill("%s  activated %s" % (self._name(pid), name), R.HUD_GOLD)
+                    audio.play("scan", 0.7)
+                else:
+                    self._set_alert("ENEMY %s  -  you show on their minimap" % name, R.HUD_CRIMSON,
+                                    float(ST.DURATION[ST.SCAN]))
+                    audio.play("scan", 0.4)
+            elif mine:                                     # your own shield: no particles inside the camera
+                self._show_banner(name, "+%d overshield for %d seconds" % (C.AEGIS_POINTS, ST.DURATION[ST.AEGIS]),
+                                  R.HUD_CYAN, 2.0)
+                audio.play("shield_up", 0.8)
+            else:
+                scene.fx_shield(position)
+        elif action == S.STREAK_IMPACT:
+            scene.fx_lance_impact(position)
+            for _ in range(2):
+                rig.add_explosion_shake(rig.cam_pos, position[None, :])
+            audio.play_at("lance_impact", position, rig.cam_pos, right)
+            self.strikes = [s for s in self.strikes if float(np.linalg.norm(s[0] - position)) > 0.5]
+        elif action == S.STREAK_BROKEN:
+            if mine:
+                scene.post.add_flash(0.25)
+                audio.play("shield_break", 0.8)
+            else:
+                scene.fx_shield(position, broken=True)
+                audio.play_at("shield_break", position, rig.cam_pos, right, 0.7)
+
+    def _update_rewards(self, dt: float, store) -> None:
+        """Per frame: lance marks, the minimap, the shield bar, the streak lines and timed alerts."""
+        client, hud, scene = self.client, self.hud, self.scene
+        me, view = client.pid, client.view
+        own = client.predictor.render_position()
+        marks, live = [], []
+        for strike in self.strikes:
+            position, end, owner = strike
+            if self.clock > end + 0.3:
+                continue
+            live.append(strike)
+            progress = 1.0 - max(end - self.clock, 0.0) / float(ST.DURATION[ST.LANCE])
+            scene.fx_lance_mark(position, progress, dt)
+            marks.append((position, progress))
+            if (self.clock < end and owner != me and not self._friendly(owner)
+                    and float(np.linalg.norm(position - own)) < C.LANCE_RADIUS + 3.0):
+                self._set_alert("ORBITAL LANCE INCOMING  -  MOVE", R.HUD_CRIMSON, 0.25)
+        self.strikes = live
+        scanning = int(store.scan_until[0]) > int(store.cmd_tick[0])
+        others, colors = [], []
+        for pid in np.flatnonzero(view.active & view.alive).tolist():
+            if pid == me:
+                continue
+            if self._friendly(pid):
+                rgb, alpha = C.TEAM_COLORS[int(client.team) % 2], 0.95
+            else:
+                fade = 1.0 - (self.clock - float(self.pings[pid])) / C.SHOT_PING_TIME
+                rgb, alpha = (1.0, 0.20, 0.16), 0.95 if scanning else 0.95 * min(max(fade, 0.0), 1.0)
+            others.append(view.pos[pid])
+            colors.append((float(rgb[0]), float(rgb[1]), float(rgb[2]), alpha))
+        hud.set_radar(own, self.yaw, others, colors, marks, 0.5 + 0.5 * math.sin(self.clock * 9.0))
+        hud.set_shield(float(store.shield[0]), C.AEGIS_POINTS)
+        if client.mode == C.MODE_ESC:
+            hud.set_streak("", "")
+        else:
+            streak = int(store.streak[0])
+            earned = sum(1 << i for i in range(ST.STREAK_COUNT) if ST.KILLS[i] <= streak)
+            goal = ST.next_goal(streak, earned)
+            line = ("STREAK %d  -  %s AT %d" % (streak, ST.STREAK_NAMES[goal], ST.KILLS[goal]) if goal >= 0
+                    else "STREAK %d  -  every reward earned" % streak)
+            ready = [ST.STREAK_NAMES[i] for i in range(ST.STREAK_COUNT) if (int(store.streak_ready[0]) >> i) & 1]
+            hud.set_streak(line, ("X  " + "   +  ".join(ready)) if ready else "")
+        if self.alert_end and self.clock >= self.alert_end:
+            self.alert_end = 0.0
+            hud.set_alert("")
+
     def _show_banner(self, text: str, sub: str, rgb, ttl: float) -> None:
         self.banner, self.banner_sub, self.banner_rgb, self.banner_ttl = text, sub, rgb, ttl
 
@@ -668,6 +806,7 @@ class NexusGame:
             audio.play("headshot" if headshot else "hit", 0.75)
             self.pm.record("hits")
             self.pm.record("damage", damage)
+            self.combat.gave(victim, damage)
         elif kind == S.EV_DAMAGE:
             _, attacker, damage, _zone, source = event
             strength = min(damage / 40.0, 1.5)
@@ -678,10 +817,13 @@ class NexusGame:
             if attacker != S.NO_PLAYER and attacker != me:
                 hud.damage_from(relative)
             audio.play("hurt", 0.7, vary=0.08)
+            self.combat.took(attacker if attacker != S.NO_PLAYER else -1, damage, _zone == C.ZONE_HEAD)
         elif kind == S.EV_KILL:
             _, killer, victim, weapon, flags = event
             if C.EQUIP_KILL_BASE <= weapon < C.EQUIP_KILL_BASE + EQ.EQUIP_COUNT:
                 weapon_name = EQ.EQUIP_NAMES[weapon - C.EQUIP_KILL_BASE]
+            elif ST.is_streak_kill(weapon):
+                weapon_name = ST.STREAK_NAMES[weapon - C.STREAK_KILL_BASE]
             elif weapon == S.WEAPON_GRENADE:
                 weapon_name = "KNOCKED OFF"
             else:
@@ -700,6 +842,7 @@ class NexusGame:
                 self.killer = "" if flags & S.KILL_SUICIDE else self._name(killer)
                 self.streak = 0
                 self.pm.record("deaths")
+                self._death_recap(killer, weapon, weapon_name, flags)
             elif killer == me:
                 self.streak += 1
                 self.pm.record("kills")
@@ -720,6 +863,8 @@ class NexusGame:
                 rig.trauma = 0.0
                 audio.play("respawn", 0.5)
                 self.death_note = ""
+                self.combat.reset()
+                hud.set_recap("")
                 if client.mode == C.MODE_ESC and client.predictor is not None:
                     ws = client.predictor.store.weapons
                     gun = int(ws.weapon[0, int(ws.slot[0])])
@@ -727,6 +872,8 @@ class NexusGame:
                                       W.WEAPON_NAMES[gun], R.HUD_WHITE, 1.4)
         elif kind == S.EV_SHOT:
             _, shooter, weapon, origin, end = event
+            if 0 <= shooter < C.MAX_PLAYERS:
+                self.pings[shooter] = self.clock
             origin = np.asarray(origin) - np.array([0.0, 0.12, 0.0])
             direction = M.normalize(np.asarray(end) - origin)
             start = origin + direction * 0.7
@@ -792,6 +939,8 @@ class NexusGame:
                     break
         elif kind == S.EV_LADDER:
             self._on_ladder(event)
+        elif kind == S.EV_STREAK:
+            self._on_streak(event)
         elif kind == S.EV_REWARD:
             _, credits, xp, reason = event
             granted, levels = self.pm.apply_reward(credits, xp)
@@ -841,6 +990,7 @@ class NexusGame:
         tactical_left = float(store.tactical_ready[0] - store.cmd_tick[0]) / max(float(store.tactical_cooldown[0]), 1.0)
         hud.set_equipment(EQ.EQUIP_NAMES[int(store.equip[0, 0])], 1.0 - min(max(lethal_left, 0.0), 1.0),
                           EQ.EQUIP_NAMES[int(store.equip[0, 1])], 1.0 - min(max(tactical_left, 0.0), 1.0))
+        self._update_rewards(dt, store)
         own = client.roster.get(client.pid)
         if client.mode == C.MODE_ESC:
             leader = max(client.roster.values(), key=lambda e: (e.score, e.kills), default=None)

@@ -511,7 +511,7 @@ class SettingsScreen(Screen):
         self.button("APPLY", 0.40, -0.225, 0.12, 0.046, self.apply_name, COL_GOOD, 0.8)
         self.label("Controls:  WASD move   SHIFT sprint   C / CTRL crouch + slide   SPACE jump   LMB fire   RMB aim",
                    0.0, -0.285, 0.60, (0, 0), COL_DIM)
-        self.label("R reload   Q swap weapon   G lethal   F tactical   TAB scoreboard   ESC pause", 0.0, -0.312, 0.60, (0, 0), COL_DIM)
+        self.label("R reload   Q swap weapon   G lethal   F tactical   X scorestreak   TAB scoreboard   ESC pause", 0.0, -0.312, 0.60, (0, 0), COL_DIM)
         self.back_button()
 
     def change(self, key: str, direction: int) -> None:

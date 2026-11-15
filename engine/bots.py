@@ -23,6 +23,7 @@ from . import config as C
 from . import equipment as EQ
 from . import mathx as M
 from . import simulation as S
+from . import streaks as ST
 from . import weapons as W
 from .controller_3d import eye_height
 
@@ -318,6 +319,10 @@ class BotController:
                  & (rng.random(k) < grenade_chance))
         smoke = (tactical_kind == EQ.KIND_SMOKE) & has_target & (hurt < 0.45)
         tactical = tactical_ready & (stim | shock | smoke)
+        ready = store.streak_ready[rows].astype(np.int64)
+        lowest = ready & -ready                                  # the reward X would use
+        lance = (lowest == (1 << ST.LANCE)) & engaged & on_target & (target_dist > 9.0) & (target_dist < 60.0)
+        reward = ((lowest == (1 << ST.SCAN)) | (lowest == (1 << ST.AEGIS)) | lance) & ((tick + self.phase[rows]) % 2 == 0)
 
         buttons |= move_buttons
         buttons |= np.where(sprint, C.BTN_SPRINT, 0).astype(np.uint16)
@@ -328,6 +333,7 @@ class BotController:
         buttons |= np.where(reload, C.BTN_RELOAD, 0).astype(np.uint16)
         buttons |= np.where(throw, C.BTN_ABILITY, 0).astype(np.uint16)
         buttons |= np.where(tactical, C.BTN_TACTICAL, 0).astype(np.uint16)
+        buttons |= np.where(reward, C.BTN_STREAK, 0).astype(np.uint16)
         buttons = np.where(alive, buttons, 0).astype(np.uint16)
         return buttons, aim_yaw, aim_pitch
 
@@ -345,7 +351,7 @@ def run_bot_match(map_key="crucible", bots: int = 8, ticks: int = 3600, difficul
         game.add_player("BOT-%02d" % index, is_bot=True)
     controller = BotController(game, difficulty, seed=seed + 1)
     game.drain_events()
-    shots = hits = kills = explosions = void_deaths = ladder_events = 0
+    shots = hits = kills = explosions = void_deaths = ladder_events = streaks_used = lance_impacts = 0
     worst = 0.0
     started = time.perf_counter()
     for _ in range(ticks):
@@ -364,6 +370,8 @@ def run_bot_match(map_key="crucible", bots: int = 8, ticks: int = 3600, difficul
             kills += kind == S.EV_KILL
             explosions += kind == S.EV_EXPLOSION
             ladder_events += kind == S.EV_LADDER
+            streaks_used += kind == S.EV_STREAK and event[3] == S.STREAK_USED
+            lance_impacts += kind == S.EV_STREAK and event[3] == S.STREAK_IMPACT
             void_deaths += kind == S.EV_KILL and bool(event[4] & S.KILL_SUICIDE) and event[3] == 0
         worst = max(worst, time.perf_counter() - t0)
     elapsed = time.perf_counter() - started
@@ -376,6 +384,7 @@ def run_bot_match(map_key="crucible", bots: int = 8, ticks: int = 3600, difficul
         "void_deaths": int(void_deaths), "finite": bool(np.isfinite(store.move.pos).all()),
         "kills_per_bot": store.kills[store.active].tolist(), "deaths_per_bot": store.deaths[store.active].tolist(),
         "ladder": game.ladder[store.active].tolist(), "ladder_events": int(ladder_events),
+        "streaks_used": int(streaks_used), "lance_impacts": int(lance_impacts),
         "ladder_ok": bool(mode != C.MODE_ESC or all(
             tuple(store.weapons.weapon[row]) == (W.escalation_weapon(game.ladder[row]),) * 2
             for row in store.active_rows().tolist())),

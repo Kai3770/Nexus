@@ -1,6 +1,6 @@
 # NEXUS-3D-EXTREME – Roadmap
 
-Stand: 15.11.2026, nach Sprint 1. Geplant aus einer Code-Analyse (Knowledge-Graph mit graphify:
+Stand: 15.11.2026, nach Sprint 2. Geplant aus einer Code-Analyse (Knowledge-Graph mit graphify:
 1472 Knoten, 3349 Kanten, 81 Module-Gruppen, keine Import-Zyklen) und Bot-Messungen.
 
 ## Bestandsaufnahme
@@ -11,8 +11,7 @@ prozedurale Grafik und Sounds; Wirtschaft mit Sponsoren und Prestige; Bots in dr
 120 automatische Tests.
 
 **Lücken aus Spielersicht:**
-- Belohnungen für Serien gibt es nur als Punkte (keine Scorestreaks).
-- Keine Minimap, kein Death-Recap, kein Killcam, schlichtes Match-Ende ohne Auswertung.
+- Kein Killcam, schlichtes Match-Ende ohne Auswertung (Scorestreaks, Minimap und Death-Recap kamen in Sprint 2).
 - Keine frei belegbaren Tasten, kein Controller.
 - Nur LAN, kein Spiel übers Internet.
 
@@ -40,13 +39,14 @@ nie auseinanderlaufen. Balance-Prüfungen (`validate_balance`, `validate_equipme
 | Fehler behoben | Doppel-Kill mit einer Schrotsalve wurde der zweiten Waffe zugerechnet; Waffenwechsel zwischen zwei gleichen Waffen hätte Nachladen umgangen; Steuerungstext im Einstellungsmenü veraltet |
 | Tests | 12 neue Tests (Regeln, Codec, Vorhersage im Live-Netz, Bot-Matches) |
 
-## Sprint 2 – „Serien, die sich lohnen“ (Vorschlag)
+## Sprint 2 – „Serien, die sich lohnen“ – erledigt
 
-| Thema | Aufwand | Warum |
-| --- | --- | --- |
-| Minimap / Radar mit Teamkameraden und Schuss-Pings | M | Orientierung; Voraussetzung für Scan-Belohnungen |
-| Scorestreaks: drei eigene Belohnungen, z. B. PULSE SCAN (3 Kills, Gegner 8 s auf der Minimap), AEGIS SHIELD (5 Kills, Überschild), ORBITAL LANCE (7 Kills, markierter Schlag mit Vorwarnung) | L | Höhepunkte im Match, belohnt gutes Spiel |
-| Death-Recap: wer, womit, aus welcher Entfernung, erlittener Schaden | S | Sofort verständlich, warum man gestorben ist |
+| Thema | Ergebnis |
+| --- | --- |
+| Scorestreaks | PULSE SCAN (3 Kills), AEGIS SHIELD (5), ORBITAL LANCE (7); einmal pro Leben verdient, warten über den Tod hinaus, Einsatz mit X; Server-Regeln, Anzeige über Owner-State und Snapshots; Bots nutzen sie |
+| Minimap | Aus der Arena-Geometrie gerastert; eigene Position, Trupp, Schuss-Pings, Scan, Lance-Gefahrenzone |
+| Death-Recap | Waffe, Entfernung, Trefferbilanz in beide Richtungen, Restleben des Gegners, Schaden von anderen |
+| Tests | 13 neue Tests (140 insgesamt), gerenderte Szenen für Markierung, Einschlag, Schild und Recap geprüft |
 
 ## Sprint 3 – „Matchgefühl“
 

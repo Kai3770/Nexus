@@ -926,3 +926,64 @@ def validate_map(loaded: LoadedMap) -> list:
         problems.append("spawn %d %s is %.1f m from the navigation graph" % (index, np.round(data.spawn_pos[index], 2),
                                                                              gap[index]))
     return problems
+
+
+# =========================================================================== #
+#  Minimap picture
+# =========================================================================== #
+def minimap_image(data: MapData, size: int = 192, margin: float = 3.0):
+    """
+    Top-down picture of an arena for the HUD minimap.  Every colliding box and
+    solid triangle is rasterised by its highest point; height sets the shade
+    and steps of more than half a metre are outlined, so walls, cover and
+    upper floors read at a glance.
+
+    Returns ``(rgba, (x0, z0, span))``: ``rgba`` is ``(size, size, 4)`` uint8
+    with row 0 at the top (north, +z), and world ``(x, z)`` sits at
+    ``((x - x0) / span, (z - z0) / span)`` of the picture measured from its
+    bottom-left corner.
+    """
+    solid = data.box_layer != 0
+    lo = np.asarray(data.bounds_min, dtype=np.float64)
+    hi = np.asarray(data.bounds_max, dtype=np.float64)
+    if not np.all(hi[[0, 2]] > lo[[0, 2]]) and solid.any():
+        lo, hi = data.box_min[solid].min(axis=0), data.box_max[solid].max(axis=0)
+    span = float(max(hi[0] - lo[0], hi[2] - lo[2], 1.0)) + 2.0 * margin
+    x0 = float(lo[0] + hi[0]) * 0.5 - span * 0.5
+    z0 = float(lo[2] + hi[2]) * 0.5 - span * 0.5
+    cell = span / size
+    top = np.full((size, size), -np.inf)
+
+    def paint(xmin, xmax, zmin, zmax, y):
+        c0, c1 = int(np.floor((xmin - x0) / cell)), int(np.ceil((xmax - x0) / cell))
+        r0, r1 = int(np.floor((z0 + span - zmax) / cell)), int(np.ceil((z0 + span - zmin) / cell))
+        c0, c1, r0, r1 = max(c0, 0), min(c1, size), max(r0, 0), min(r1, size)
+        if c1 > c0 and r1 > r0:
+            np.maximum(top[r0:r1, c0:c1], y, out=top[r0:r1, c0:c1])
+
+    for bmin, bmax in zip(data.box_min[solid], data.box_max[solid]):
+        paint(bmin[0], bmax[0], bmin[2], bmax[2], bmax[1])
+    for tri in data.mesh_tris[data.mesh_solid]:
+        paint(tri[:, 0].min(), tri[:, 0].max(), tri[:, 2].min(), tri[:, 2].max(), tri[:, 1].max())
+
+    filled = np.isfinite(top)
+    rgba = np.zeros((size, size, 4), dtype=np.float64)
+    rgba[...] = (0.02, 0.03, 0.05, 0.50)                      # the void around the arena
+    if filled.any():
+        h = top[filled]
+        low, high = np.percentile(h, 2.0), np.percentile(h, 98.0)
+        shade = np.clip((top - low) / max(high - low, 1.0e-3), 0.0, 1.0)
+        level = np.where(filled, top, low - 10.0)
+        step = np.zeros((size, size))
+        for axis in (0, 1):
+            for shift in (1, -1):
+                step = np.maximum(step, np.abs(level - np.roll(level, shift, axis=axis)))
+        edge = filled & (step > 0.5)
+        tone = np.where(edge, 0.86, 0.15 + 0.45 * shade)
+        rgba[filled, 0] = tone[filled] * 0.86
+        rgba[filled, 1] = tone[filled] * 0.93
+        rgba[filled, 2] = tone[filled] * 1.00
+        rgba[filled, 3] = 0.86
+    rgba[[0, -1], :] = (0.55, 0.62, 0.70, 0.95)               # frame
+    rgba[:, [0, -1]] = (0.55, 0.62, 0.70, 0.95)
+    return (np.clip(rgba, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8), (x0, z0, span)

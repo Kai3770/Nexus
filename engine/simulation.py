@@ -32,6 +32,7 @@ from . import config as C
 from . import equipment as EQ
 from . import mathx as M
 from . import maps
+from . import streaks as ST
 from . import weapons as W
 from .controller_3d import (CollisionWorld, HitboxSet, KinematicState, HITBOX_MULTIPLIER, HITBOX_ZONE,
                             eye_height, step_kinematics)
@@ -57,6 +58,12 @@ LADDER_PROMOTED = 1  # gun kill: one step up                                (oth
 LADDER_STEAL = 2    # hatchet kill: the killer moves up ...                 (other = victim)
 LADDER_STOLEN = 3   # ... and the victim moves down                        (other = killer)
 LADDER_SUICIDE = 4  # killed yourself: one step down
+EV_STREAK = 13      # (EV_STREAK, player, reward, action, (x, y, z))   scorestreak news
+
+STREAK_EARNED = 0   # the reward is ready for ``player`` (only that player hears of it)
+STREAK_USED = 1     # activated; for the lance the position is the marked spot
+STREAK_IMPACT = 2   # the lance strikes the position
+STREAK_BROKEN = 3   # an AEGIS shield was shot away
 
 KILL_HEADSHOT = 1
 KILL_EXPLOSIVE = 2
@@ -82,7 +89,7 @@ _TICKS = C.TICK_RATE
 class PlayerStore:
     """All per-player state for ``capacity`` slots, one array per component."""
 
-    OWNER_STRUCT = struct.Struct("<3f3fHHH5f2fBHHIdfIIfBIHBBBIIBBQ")   # ... equipment, stun, weapons, levels
+    OWNER_STRUCT = struct.Struct("<3f3fHHH5f2fBHHIdfIIfBIHBBBIIBBQHIIBB")   # ... loadout, shield, scan, streak
     OWNER_SIZE = OWNER_STRUCT.size
 
     def __init__(self, capacity: int = C.MAX_PLAYERS):
@@ -113,6 +120,11 @@ class PlayerStore:
         self.stun_until = np.zeros(n, dtype=np.int64)                    # command tick until which movement is slowed
         self.heal_left = np.zeros(n, dtype=np.float64)                   # stim healing still to be delivered
         self.heal_rate = np.zeros(n, dtype=np.float64)                   # health per second while it lasts
+        self.shield = np.zeros(n, dtype=np.float64)                      # AEGIS overshield points left
+        self.shield_until = np.zeros(n, dtype=np.int64)                  # command tick when the shield fades
+        self.scan_until = np.zeros(n, dtype=np.int64)                    # command tick until enemies show on the radar
+        self.streak_earned = np.zeros(n, dtype=np.uint8)                 # rewards earned in this life (bit mask)
+        self.streak_ready = np.zeros(n, dtype=np.uint8)                  # rewards waiting for X (bit mask)
         self.regen_delay = np.full(n, int(round(C.HEALTH_REGEN_DELAY * _TICKS)), dtype=np.int64)
         self.kills = np.zeros(n, dtype=np.int64)
         self.deaths = np.zeros(n, dtype=np.int64)
@@ -166,6 +178,19 @@ class PlayerStore:
         self.pending_equip[row] = (lethal, tactical)
         self.refresh_cooldowns(row)
 
+    def copy_rewards(self, row: int, shield: float, shield_until: int, scan_until: int, streak: int,
+                     ready: int) -> None:
+        """Scorestreak state the client only displays (never predicts)."""
+        self.shield[row] = shield
+        self.shield_until[row] = shield_until
+        self.scan_until[row] = scan_until
+        self.streak[row] = streak
+        self.streak_ready[row] = ready
+
+    def reward_state(self, row: int) -> tuple:
+        return (float(self.shield[row]), int(self.shield_until[row]), int(self.scan_until[row]),
+                int(self.streak[row]), int(self.streak_ready[row]))
+
     # ---- owner state (everything the predicting client must agree on) ---------------
     def pack_owner(self, row: int) -> bytes:
         mv, ws = self.move, self.weapons
@@ -182,13 +207,15 @@ class PlayerStore:
             int(round(self.max_health[row])), int(self.spawn_seq[row]) & 0xFF,
             int(self.equip[row, 0]), int(self.equip[row, 1]), int(self.tactical_ready[row]) & 0xFFFFFFFF,
             int(self.stun_until[row]) & 0xFFFFFFFF,
-            int(ws.weapon[row, 0]) & 0xFF, int(ws.weapon[row, 1]) & 0xFF, W.pack_levels(ws.levels[row]))
+            int(ws.weapon[row, 0]) & 0xFF, int(ws.weapon[row, 1]) & 0xFF, W.pack_levels(ws.levels[row]),
+            min(int(round(float(self.shield[row]) * 10.0)), 65535), int(self.shield_until[row]) & 0xFFFFFFFF,
+            int(self.scan_until[row]) & 0xFFFFFFFF, min(int(self.streak[row]), 255), int(self.streak_ready[row]))
 
     def unpack_owner(self, row: int, payload: bytes, offset: int = 0) -> None:
         (px, py, pz, vx, vy, vz, mflags, mprev, wprev, slide_t, slide_cd, crouch_t, air_t, jump_buf, sdx, sdz,
          slot, ammo0, ammo1, reload_end, next_fire, bloom, shots, ability_ready, health, alive, cmd_tick,
          max_health, spawn_seq, lethal, tactical, tactical_ready, stun_until, weapon0, weapon1,
-         packed_levels) = self.OWNER_STRUCT.unpack_from(payload, offset)
+         packed_levels, shield10, shield_until, scan_until, streak, streak_ready) = self.OWNER_STRUCT.unpack_from(payload, offset)
         mv, ws = self.move, self.weapons
         levels = W.unpack_levels(packed_levels)
         if ((int(ws.weapon[row, 0]), int(ws.weapon[row, 1])) != (weapon0, weapon1)
@@ -217,6 +244,7 @@ class PlayerStore:
         self.cmd_tick[row] = cmd_tick
         self.max_health[row] = max_health
         self.spawn_seq[row] = spawn_seq
+        self.copy_rewards(row, shield10 / 10.0, shield_until, scan_until, streak, streak_ready)
         if (lethal, tactical) != (int(self.equip[row, 0]), int(self.equip[row, 1])):
             self.apply_equipment(row, (lethal, tactical))
         self.tactical_ready[row] = tactical_ready
@@ -478,6 +506,7 @@ class GameWorld:
         self.intermission_end = 0
         self.matches_played = 0
         self.next_map = None                 # arena to load when the intermission ends (map rotation)
+        self.strikes: list = []              # pending orbital lances: [impact tick, position, owner]
         self.loaded = maps.load_map(map_key)
         self.map_index = self.loaded.data.index
         self.world = self.loaded.world
@@ -489,6 +518,7 @@ class GameWorld:
         self.world = self.loaded.world
         self.grenades.clear()
         self.zones.clear()
+        self.strikes.clear()
         self.store.move._cache_version = -1
 
     # ---- membership --------------------------------------------------------------------
@@ -510,6 +540,9 @@ class GameWorld:
         s.is_bot[row] = bool(is_bot)
         s.names[row] = str(name)[:16] or ("BOT-%02d" % row if is_bot else "PLAYER-%02d" % row)
         s.kills[row] = s.deaths[row] = s.score[row] = s.streak[row] = 0
+        s.shield[row] = 0.0
+        s.shield_until[row] = s.scan_until[row] = 0
+        s.streak_earned[row] = s.streak_ready[row] = 0
         s.pending_credits[row] = 0.0
         s.cmd_tick[row] = self.tick
         s.ability_ready[row] = 0
@@ -607,8 +640,12 @@ class GameWorld:
     # ---- command execution -------------------------------------------------------------------
     def step_commands(self, rows, buttons, yaw, pitch, cmd_tick):
         """Simulate one command per row and use any equipment that was triggered."""
-        fired, lethal, tactical = simulate_commands(self.store, self.world, rows, buttons, yaw, pitch, cmd_tick)
         rows = np.atleast_1d(np.asarray(rows, dtype=np.intp))
+        held = (np.broadcast_to(np.asarray(buttons, dtype=np.uint16), rows.shape) & C.BTN_STREAK) != 0
+        streak = held & ((self.store.weapons.prev_buttons[rows] & C.BTN_STREAK) == 0) & self.store.alive[rows]
+        fired, lethal, tactical = simulate_commands(self.store, self.world, rows, buttons, yaw, pitch, cmd_tick)
+        for row in rows[streak].tolist():
+            self.use_streak(int(row))
         for row in rows[lethal].tolist():
             self.throw_equipment(int(row), int(self.store.equip[row, 0]))
         for row in rows[tactical].tolist():
@@ -677,8 +714,17 @@ class GameWorld:
         s = self.store
         if not s.alive[victim] or amount <= 0.0 or self.phase != C.PHASE_LIVE:
             return 0.0
-        dealt = float(min(amount, s.health[victim]))
-        s.health[victim] -= dealt
+        absorbed = 0.0
+        if s.shield[victim] > 0.0:
+            absorbed = float(min(amount, s.shield[victim]))
+            s.shield[victim] -= absorbed
+            amount -= absorbed
+            if s.shield[victim] <= 1.0e-6:
+                s.shield[victim] = 0.0
+                self.events.append((EV_STREAK, victim, ST.AEGIS, STREAK_BROKEN, tuple(s.move.pos[victim].tolist())))
+        hurt = float(min(amount, s.health[victim]))
+        s.health[victim] -= hurt
+        dealt = absorbed + hurt
         s.last_damage_tick[victim] = self.tick
         killed = s.health[victim] <= 1.0e-6
         hostile = 0 <= attacker != victim
@@ -703,12 +749,15 @@ class GameWorld:
         s.health[victim] = 0.0
         s.deaths[victim] += 1
         s.streak[victim] = 0
+        s.streak_earned[victim] = 0
+        s.shield[victim] = 0.0
         s.respawn_tick[victim] = self.tick + int(C.RESPAWN_TIME * _TICKS)
         s.hitboxes.valid[victim] = False
         hostile = 0 <= attacker != victim
         if hostile:
             s.kills[attacker] += 1
-            s.streak[attacker] += 1
+            if not ST.is_streak_kill(weapon):            # rewards never feed further rewards
+                s.streak[attacker] += 1
             bonus = 25 * int(min(s.streak[attacker] - 1, 8))
             head = 50 if flags & KILL_HEADSHOT else 0
             s.score[attacker] += 100 + head
@@ -723,8 +772,85 @@ class GameWorld:
             s.score[victim] = max(int(s.score[victim]) - 50, 0)
             killer = victim if attacker == victim else NO_PLAYER
         self.events.append((EV_KILL, killer, victim, weapon, flags))
+        if hostile and self.mode != C.MODE_ESC:
+            self._grant_streaks(attacker)
         if self.mode == C.MODE_ESC:
             self._escalate(victim, attacker if hostile else NO_PLAYER, weapon)
+
+    # ---- scorestreaks ---------------------------------------------------------------------------------------
+    def _grant_streaks(self, row: int) -> None:
+        s = self.store
+        for index in ST.earned_by(int(s.streak[row]), int(s.streak_earned[row])):
+            bit = np.uint8(1 << index)
+            s.streak_earned[row] |= bit
+            if not s.streak_ready[row] & bit:                  # one of each kind waits at most: no second banner
+                s.streak_ready[row] |= bit
+                self.events.append((EV_STREAK, row, index, STREAK_EARNED, tuple(s.move.pos[row].tolist())))
+
+    def use_streak(self, row: int) -> bool:
+        """X: use the smallest ready reward.  Returns True when one was used."""
+        s = self.store
+        index = ST.next_ready(int(s.streak_ready[row]))
+        if index < 0 or not s.alive[row] or self.phase != C.PHASE_LIVE:
+            return False
+        position = s.move.pos[row].copy()
+        if index == ST.SCAN:                                   # the squad (in free for all: just you) sees everyone
+            squad = np.flatnonzero(s.active & (s.team == s.team[row]))
+            s.scan_until[squad] = np.maximum(s.scan_until[squad], s.cmd_tick[squad] + ST.duration_ticks(index))
+        elif index == ST.AEGIS:
+            s.shield[row] = C.AEGIS_POINTS
+            s.shield_until[row] = int(s.cmd_tick[row]) + ST.duration_ticks(index)
+        elif index == ST.LANCE:
+            target = self.lance_target(row)
+            if target is None:                                 # aimed at the sky with nothing below: keep it
+                return False
+            position = target
+            self.strikes.append([self.tick + ST.duration_ticks(index), target, row])
+        s.streak_ready[row] &= np.uint8(0xFF ^ (1 << index))
+        self.events.append((EV_STREAK, row, index, STREAK_USED, tuple(np.asarray(position, dtype=float).tolist())))
+        return True
+
+    def lance_target(self, row: int):
+        """The surface under the player's crosshair (or below the end of the ray); None over the void."""
+        s = self.store
+        eye = s.eye_position(row)[0]
+        direction = M.forward_vector(s.yaw[row], s.pitch[row])
+        t, item, _ = self.world.raycast(eye, direction, C.LANCE_RANGE, C.LAYER_BULLET)
+        if item[0] >= 0:
+            return eye + direction * max(float(t[0]) - 0.05, 0.0)
+        far = eye + direction * C.LANCE_RANGE
+        down = np.array([0.0, -1.0, 0.0])
+        t, item, _ = self.world.raycast(far, down, 400.0, C.LAYER_BULLET)
+        return far + down * float(t[0]) if item[0] >= 0 else None
+
+    def _step_strikes(self) -> None:
+        due = [strike for strike in self.strikes if strike[0] <= self.tick]
+        if due:
+            self.strikes = [strike for strike in self.strikes if strike[0] > self.tick]
+            for _, position, owner in due:
+                self.lance_impact(position, owner)
+
+    def lance_impact(self, position, owner: int) -> None:
+        """The orbital lance lands: linear falloff, line of sight, the owner and their squad are spared."""
+        s = self.store
+        position = np.asarray(position, dtype=np.float64)
+        owner = owner if 0 <= owner < s.capacity and s.active[owner] else -1
+        self.events.append((EV_STREAK, owner if owner >= 0 else NO_PLAYER, ST.LANCE, STREAK_IMPACT,
+                            tuple(position.tolist())))
+        rows, delta, dist = self._affected(position + np.array([0.0, 0.3, 0.0]), C.LANCE_RADIUS, owner)
+        keep = rows != owner
+        rows, delta, dist = rows[keep], delta[keep], dist[keep]
+        if rows.size == 0:
+            return
+        damage = ST.lance_damage(dist) * s.blast_resist[rows]
+        reach = np.clip(1.0 - dist / C.LANCE_RADIUS, 0.0, 1.0)
+        push = delta / np.maximum(dist, 1.0e-6)[:, None]
+        push[:, 1] = np.maximum(push[:, 1], 0.5)
+        s.move.vel[rows] += push * (C.LANCE_KNOCKBACK * reach)[:, None]
+        s.move.mflags[rows] &= np.uint16(0xFFFF ^ (C.MF_ON_GROUND | C.MF_SLIDING))
+        weapon = C.STREAK_KILL_BASE + ST.LANCE
+        for row, amount in zip(rows.tolist(), damage.tolist()):
+            self.apply_damage(int(row), owner, float(amount), C.ZONE_TORSO, weapon, position, explosive=True)
 
     # ---- ESCALATION ----------------------------------------------------------------------------------------
     def mode_equipment(self, chosen) -> tuple:
@@ -1003,6 +1129,10 @@ class GameWorld:
         s = self.store
         self.tick += 1
         self._step_equipment()
+        faded = np.flatnonzero(s.active & (s.shield > 0.0) & (s.cmd_tick >= s.shield_until))
+        s.shield[faded] = 0.0
+        if self.strikes:
+            self._step_strikes()
         live = s.active & s.alive
         fell = np.flatnonzero(live & (s.move.pos[:, 1] < self.loaded.data.kill_y))
         for row in fell.tolist():
@@ -1087,6 +1217,12 @@ class GameWorld:
         s.score[:] = 0
         s.streak[:] = 0
         s.pending_credits[:] = 0.0
+        s.shield[:] = 0.0
+        s.shield_until[:] = 0
+        s.scan_until[:] = 0
+        s.streak_earned[:] = 0
+        s.streak_ready[:] = 0
+        self.strikes.clear()
         self.ladder[:] = 0
         if self.mode == C.MODE_ESC:
             for row in s.active_rows().tolist():

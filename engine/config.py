@@ -112,7 +112,7 @@ BROADCAST_ADDRESS = "255.255.255.255"
 BEACON_INTERVAL = 1.0
 BEACON_EXPIRY = 3.5
 PROTOCOL_MAGIC = 0x584E
-PROTOCOL_VERSION = 12
+PROTOCOL_VERSION = 13
 MAX_DATAGRAM = 1200
 RECV_BUFFER = 4096
 CONNECT_RETRY_INTERVAL = 0.25
@@ -159,12 +159,13 @@ BTN_ADS = 1 << 10
 BTN_SWAP = 1 << 11
 BTN_FIRED = 1 << 12
 BTN_TACTICAL = 1 << 13                    # use the tactical equipment (stim, shock, smoke)
+BTN_STREAK = 1 << 14                      # use a ready scorestreak reward (X)
 
 BUTTON_NAMES = {
     BTN_FORWARD: "forward", BTN_LEFT: "left", BTN_BACK: "back", BTN_RIGHT: "right",
     BTN_SLIDE: "slide", BTN_JUMP: "jump", BTN_SHOOT: "shoot", BTN_ABILITY: "ability",
     BTN_SPRINT: "sprint", BTN_RELOAD: "reload", BTN_ADS: "ads", BTN_SWAP: "swap", BTN_FIRED: "fired",
-    BTN_TACTICAL: "tactical",
+    BTN_TACTICAL: "tactical", BTN_STREAK: "streak",
 }
 
 # Movement state flags ---------------------------------------------------------
@@ -449,6 +450,26 @@ GRENADE_CAPACITY = 32
 EXPLOSION_KNOCKBACK = 11.0
 
 # --------------------------------------------------------------------------- #
+#  Scorestreaks: rewards for kills in a row within one life (not in ESCALATION)
+# --------------------------------------------------------------------------- #
+# A reward is earned once per life when the streak reaches its kill count and then waits, through deaths,
+# until X uses it (the smallest ready reward first) or the match ends.  Kills made by a reward do not extend
+# the streak.  ``duration`` is in seconds: the scan and shield time, the lance's warning delay.
+STREAK_COLUMNS = ("key", "name", "kills", "duration", "description")
+STREAK_TABLE = (
+    ("scan", "PULSE SCAN", 3, 8.0, "Every enemy shows on your minimap (and your squad's) for 8 seconds."),
+    ("aegis", "AEGIS SHIELD", 5, 20.0, "A 50 point overshield takes damage before your vitals, for 20 seconds."),
+    ("lance", "ORBITAL LANCE", 7, 2.0, "Marks the spot under your crosshair; 2 seconds later a strike flattens it."),
+)
+STREAK_KILL_BASE = 220                   # kill-feed weapon id of a scorestreak kill: base + reward index
+AEGIS_POINTS = 50.0
+LANCE_RANGE = 160.0                      # how far the targeting ray reaches (metres)
+LANCE_RADIUS = 7.0
+LANCE_DAMAGE = 240.0                     # at the centre, falling off linearly to the edge; owner and squad are spared
+LANCE_KNOCKBACK = 16.0
+SHOT_PING_TIME = 1.6                     # a gunshot shows the shooter on enemy minimaps for this long (seconds)
+
+# --------------------------------------------------------------------------- #
 #  Audio gain staging
 # --------------------------------------------------------------------------- #
 # final gain = clamp(master, 0, 1) * ceiling[category] * clamp(cue volume, 0, 1) * distance falloff
@@ -476,6 +497,8 @@ AUDIO_CATEGORY = {
     "hatchet": "movement", "hatchet_hit": "impact", "stick": "feedback", "fire": "explosion", "shock": "explosion",
     "smoke": "explosion", "stim": "feedback", "stun_ring": "feedback",
     "escalate": "announcer", "final_weapon": "announcer", "demoted": "announcer",
+    "streak_ready": "announcer", "scan": "feedback", "shield_up": "feedback", "shield_break": "impact",
+    "lance_mark": "explosion", "lance_impact": "explosion",
 }
 AUDIO_MIN_GAIN = 0.003                   # quieter cues are not started at all
 AUDIO_DUCK_WINDOW = 0.07                 # seconds; overlapping cues of one category are attenuated

@@ -29,7 +29,7 @@ python main.py
 
 Controls: `WASD` move, `SHIFT` sprint, `C` / `CTRL` crouch and slide (press while sprinting),
 `SPACE` jump, left mouse fire, right mouse aim, `R` reload, `Q` swap weapon, `G` lethal equipment,
-`F` tactical equipment, `TAB` scoreboard, `ESC` pause.
+`F` tactical equipment, `X` scorestreak reward, `TAB` scoreboard, `ESC` pause.
 
 ## Playing on a LAN
 
@@ -130,6 +130,24 @@ a player wearing a cling charge always dies, fire needs more than two seconds to
 hits only) recharges fastest, and a stim heals too slowly to win a gunfight with. The table is
 `EQUIPMENT_TABLE` in `engine/config.py`.
 
+## Scorestreaks, minimap and death recap
+
+Kills in a row within one life earn rewards (not in ESCALATION). A reward is earned once per life and
+then waits, also through deaths, until `X` uses it (the smallest ready one first) or the match ends.
+Kills made by a reward never extend the streak.
+
+| Reward | Kills | What it does |
+| --- | --- | --- |
+| PULSE SCAN | 3 | Every enemy shows on the minimap for 8 s -- yours and your squad's in Team Deathmatch. The enemy gets a warning |
+| AEGIS SHIELD | 5 | A 50 point overshield takes damage before your vitals for 20 s; others see you shimmer cyan |
+| ORBITAL LANCE | 7 | Marks the spot under your crosshair; everyone sees the red ring, the beam and the danger zone on the minimap, and players inside get an alert. 2 s later it strikes: 240 at the centre, falling off to 0 at 7 m, blocked by cover; you and your squad are spared |
+
+The **minimap** (top left) is rasterised from the arena geometry when a map loads (`maps.minimap_image`):
+walls and cover outlined, higher floors brighter. It shows you, your squad, enemies for 1.6 s after they
+fire, everybody during a PULSE SCAN, and marked lances. While you are dead the **death recap** says who
+killed you, with what, from how far, how the exchange went and how much health they kept
+(`engine/recap.py`). Bots earn and use rewards too. The table is `STREAK_TABLE` in `engine/config.py`.
+
 ## Weapon balance
 
 29 weapons in seven classes; maximum health is 100 for everybody. Damage per trigger pull scales inversely
@@ -209,6 +227,7 @@ A host can run a level playing field with `dedicated_server.py --no-upgrades`.
 | `engine/secure_save.py` | **Module D.** Cost math, sponsors, Corporate Sponsor Thread, sealed and signed profile file |
 | `engine/simulation.py`, `engine/weapons.py`, `engine/bots.py` | Shared deterministic simulation, weapon state machine and balance model, bot AI |
 | `engine/equipment.py` | Lethal / tactical equipment table, per-kind helpers and balance rules |
+| `engine/streaks.py`, `engine/recap.py` | Scorestreak reward table and helpers; the death recap's combat log |
 | `engine/game.py`, `engine/menus.py`, `engine/audio.py` | Client loop, front end, synthesised sound and the mixer |
 | `engine/mathx.py`, `engine/crypto.py` | Vector / quaternion math, stream cipher |
 
@@ -223,7 +242,8 @@ A host can run a level playing field with `dedicated_server.py --no-upgrades`.
   the client adopts the server state and replays all pending commands inside that frame.
   That owner state also carries the complete loadout (both weapon ids and every upgrade level),
   so a gun the server hands out -- the ESCALATION ladder -- reaches the prediction with the next
-  snapshot, without a separate message that could arrive out of order.
+  snapshot, without a separate message that could arrive out of order. Scorestreak state (shield,
+  scan timer, streak, ready rewards) rides along for the HUD; it is shown, never predicted.
 * **Interpolation.** Other players are drawn 100 ms in the past, positions interpolated linearly
   and orientations with quaternion SLERP between the two snapshots around that time.
 * **Lag compensation.** Every shot carries a FIRE record with the client's view timestamp. The
@@ -249,7 +269,7 @@ python -m pytest tests -q
 python tests/run_all.py
 ```
 
-The second command needs no pytest. 127 tests cover the math, the octree against a brute-force
+The second command needs no pytest. 140 tests cover the math, the octree against a brute-force
 reference, movement, weapons and the balance model, the simulation, all arenas and the injector
 (run-time registration, JSON drop-ins, malformed definitions, checksums), navigation on every
 storey, bot-only matches, the save system, wire codecs, rollback, live client / server sessions
@@ -257,7 +277,10 @@ over loopback with latency, jitter and packet loss, a client that lacks the serv
 mixer, every equipment item (hatchet hits, charges sticking to players, fire, stuns, smoke against bots,
 stims, respawn-time class changes), the ESCALATION ladder (climbing, stolen steps, a shotgun volley that
 kills twice, the winner, a live session in which the client predicts with the gun the server hands out,
-bot matches), procedural materials, light baking, dynamic resolution, camera springs at 10 fps, a client
+bot matches), every scorestreak reward (earning per life, the X key, the shield soaking damage, the scan's
+reach, the lance's warning time, falloff and squad immunity, a live session raising the shield, bots using
+them), the minimap of every arena, the death recap, procedural materials, light baking, dynamic resolution,
+camera springs at 10 fps, a client
 that stalls while baking, and two rendered end-to-end runs
 (under `xvfb-run` when there is no display; skipped if neither exists).
 

@@ -1478,6 +1478,11 @@ class CharacterBatch:
             rgb[:, PART_VISOR, :] = np.minimum(base * 1.5 + 0.25, 1.6)
             glow = np.broadcast_to(self.flash[rows][:, None], (n, PART_COUNT)).copy()
             glow[:, PART_VISOR] = 1.0
+            shield = getattr(view, "shield", None)
+            if shield is not None and np.any(shield[rows] > 0.0):
+                aura = np.clip(shield[rows] / C.AEGIS_POINTS, 0.0, 1.0)
+                rgb = rgb * (1.0 - 0.45 * aura)[:, None, None] + np.array([0.35, 0.80, 1.0]) * (0.45 * aura)[:, None, None]
+                glow = np.maximum(glow, (0.30 * aura)[:, None])
             per_player = PART_COUNT * 24
             out = np.zeros(n * per_player, dtype=WORLD_VERTEX)
             out["pos"] = world.reshape(-1, 3)
@@ -2278,6 +2283,45 @@ class SceneRenderer:
                              size=(radius * 0.30, radius * 0.62), life=(2.6, 3.8), gravity=-0.02, drag=1.4,
                              jitter=radius * 0.38)
 
+    def fx_lance_mark(self, position, progress: float, dt: float) -> None:
+        """A marked ORBITAL LANCE: red sparks on a ring that closes in, and a targeting beam (call every frame)."""
+        p = np.asarray(position, dtype=np.float64)
+        rng = self.sparks.rng
+        progress = min(max(progress, 0.0), 1.0)
+        radius = C.LANCE_RADIUS * (1.0 - 0.8 * progress)
+        for angle in rng.uniform(0.0, 2.0 * np.pi, int(rng.poisson(120.0 * dt * max(self.particle_scale, 0.6)))):
+            spot = p + np.array([math.cos(angle) * radius, 0.15, math.sin(angle) * radius])
+            self.sparks.emit(spot, 1, direction=(0.0, 1.0, 0.0), spread=0.2, speed=(0.4, 1.4),
+                             rgba=(1.0, 0.18, 0.10, 0.95), size=(0.10, 0.02), life=(0.25, 0.45), gravity=-0.1)
+        if rng.random() < 20.0 * dt:
+            self.tracers.add(p + np.array([0.0, 70.0, 0.0]), p, (1.0, 0.20, 0.12, 0.55 + 0.4 * progress),
+                             0.04 + 0.08 * progress, speed=520.0, streak=70.0)
+
+    def fx_lance_impact(self, position) -> None:
+        """The lance lands: a white beam from the sky, a heavy blast, smoke and a scorch mark."""
+        p = np.asarray(position, dtype=np.float64)
+        for k in range(4):
+            offset = np.array([1.0, 0.0, 1.0]) * self.sparks.rng.normal(0.0, 0.25, 3)
+            self.tracers.add(p + offset + np.array([0.0, 80.0, 0.0]), p + offset, (0.85, 0.95, 1.0, 1.0),
+                             0.35 - 0.06 * k, speed=900.0, streak=80.0)
+        lift = p + np.array([0.0, 0.4, 0.0])
+        self.sparks.emit(lift, self._amount(160), speed=(6.0, 26.0), rgba=(1.0, 0.75, 0.45, 1.0), size=(0.16, 0.03),
+                         life=(0.3, 1.0), gravity=0.6)
+        self.sparks.emit(lift, self._amount(40), speed=(0.5, 4.0), rgba=(0.85, 0.95, 1.0, 1.0), size=(1.6, 0.3),
+                         life=(0.12, 0.30), gravity=0.0, jitter=1.2)
+        self.smoke.emit(lift, self._amount(60), speed=(1.0, 7.0), rgba=(0.30, 0.30, 0.33, 0.6), size=(0.8, 3.2),
+                        life=(1.2, 2.8), gravity=-0.05, drag=1.2, jitter=1.4)
+        self.lights.explosion(p + np.array([0.0, 1.0, 0.0]), rgb=(0.80, 0.90, 1.0), intensity=160.0, duration=0.55)
+        self.decals.add(p - np.array([0.0, 0.05, 0.0]), (0.0, 1.0, 0.0), size=4.5, rgba=(0.02, 0.02, 0.02, 0.75))
+
+    def fx_shield(self, position, broken: bool = False) -> None:
+        """AEGIS SHIELD raised (a soft cyan swirl) or shot away (a burst of cyan shards)."""
+        p = np.asarray(position, dtype=np.float64) + np.array([0.0, 1.0, 0.0])
+        self.sparks.emit(p, self._amount(60 if broken else 36), speed=(2.0, 8.0) if broken else (0.5, 2.5),
+                         rgba=(0.45, 0.85, 1.0, 1.0), size=(0.08, 0.01), life=(0.2, 0.5),
+                         gravity=0.3 if broken else -0.2, jitter=0.4)
+        self.lights.explosion(p, rgb=(0.40, 0.80, 1.0), intensity=25.0 if broken else 12.0, duration=0.25)
+
     def fx_damage_number(self, position, amount: float, headshot: bool = False, killed: bool = False) -> None:
         rgb = (1.0, 0.10, 0.16) if headshot else ((1.0, 0.78, 0.20) if killed else (1.0, 1.0, 1.0))
         self.damage_text.spawn(position, amount, rgb, 1.35 if headshot else 1.0)
@@ -2316,12 +2360,17 @@ HUD_WHITE = (0.94, 0.96, 1.00)
 HUD_CRIMSON = (1.00, 0.08, 0.16)
 HUD_GOLD = (1.00, 0.80, 0.25)
 HUD_DIM = (0.62, 0.68, 0.76)
+HUD_CYAN = (0.40, 0.85, 1.00)
 HITMARKER_TIME = 0.24
 CROSSHAIR_ARM = 0.011
 HEALTH_WIDTH = 0.246
 ABILITY_WIDTH = 0.142
+RADAR_DOTS = C.MAX_PLAYERS                # every other player can show on the minimap
+RADAR_STRIKES = 4                         # marked orbital lances shown at once
+MINIMAP_SIZE = 0.21                       # side of the square minimap (UI units)
 (Q_CROSS, Q_DOT, Q_HIT, Q_INDICATOR, Q_HEALTH_BACK, Q_HEALTH, Q_ABILITY_BACK, Q_ABILITY, Q_TACTICAL_BACK, Q_TACTICAL,
- HUD_QUADS) = (0, 4, 5, 9, 15, 16, 17, 18, 19, 20, 21)
+ Q_SHIELD, Q_RADAR_SELF, Q_RADAR_DOTS, Q_RADAR_STRIKES, HUD_QUADS) = (0, 4, 5, 9, 15, 16, 17, 18, 19, 20, 21, 22, 24,
+                                                                    24 + RADAR_DOTS, 24 + RADAR_DOTS + RADAR_STRIKES)
 
 
 class HUD:
@@ -2413,6 +2462,16 @@ class HUD:
         self.board_stats = Text("", parent=self.board, position=(0.10, 0.265), scale=0.85, origin=(-0.5, 0.5),
                                 color=_rgba(*HUD_WHITE))
         self._board_stamp = None
+        # ---- shield, scorestreaks, death recap, alerts ---------------------------------------------------------
+        self.shield_text = self._text("", -hw + 0.372, -0.445, 0.95, (-0.5, 0), HUD_CYAN)
+        self.streak_text = self._text("", -hw + 0.045, -0.392, 0.62, (-0.5, 0), HUD_DIM)
+        self.ready_text = self._text("", -hw + 0.045, -0.366, 0.74, (-0.5, 0), HUD_GOLD)
+        self.recap_text = self._text("", 0.0, 0.048, 0.80, (0, 0), HUD_WHITE)
+        self.alert_text = self._text("", 0.0, 0.398, 0.78, (0, 0), HUD_CRIMSON)
+        # ---- minimap: the arena picture (own entity, drawn under the vector table) plus radar quads ----------
+        self.minimap = None
+        self.minimap_bounds = None
+        self.minimap_center = np.array([-hw + 0.03 + MINIMAP_SIZE * 0.5, 0.385 - MINIMAP_SIZE * 0.5])
         self._upload()
 
     # ---- construction helpers ---------------------------------------------------------------
@@ -2535,6 +2594,81 @@ class HUD:
                   alpha if fraction > 0.0 else 0.0)
         self._set(self.ability_text, "%s [G]" % lethal_name)
         self._set(self.tactical_text, "%s [F]" % tactical_name)
+
+    # ---- minimap ----------------------------------------------------------------------------------------------
+    def set_minimap(self, rgba, bounds) -> None:
+        """Install an arena picture (``maps.minimap_image``) and its world bounds ``(x0, z0, span)``."""
+        from PIL import Image
+        from ursina import Texture
+
+        texture = Texture(Image.fromarray(np.ascontiguousarray(rgba), "RGBA"))
+        if self.minimap is None:
+            self.minimap = Entity(parent=self.root, model="quad", texture=texture, scale=(MINIMAP_SIZE, MINIMAP_SIZE),
+                                  position=(float(self.minimap_center[0]), float(self.minimap_center[1]), 0.0))
+            self.minimap.setBin("background", 5)              # under the radar quads (bin 10)
+            self.minimap.setDepthTest(False)
+            self.minimap.setDepthWrite(False)
+        else:
+            self.minimap.texture = texture
+        self.minimap.enabled = True
+        self.minimap_bounds = tuple(float(v) for v in bounds)
+
+    def _radar_point(self, xz) -> np.ndarray:
+        x0, z0, span = self.minimap_bounds
+        xz = np.atleast_2d(np.asarray(xz, dtype=np.float64))
+        uv = np.clip(np.stack([(xz[:, 0] - x0) / span, (xz[:, 1] - z0) / span], axis=1) - 0.5, -0.48, 0.48)
+        return self.minimap_center[None, :] + uv * MINIMAP_SIZE
+
+    def set_radar(self, own, yaw: float, others=(), colors=(), strikes=(), pulse: float = 0.0) -> None:
+        """
+        Minimap contents: the own arrow at world position ``own`` facing
+        ``yaw``, other players ``others`` (``(N, 3)``) in ``colors`` (RGBA; alpha
+        0 hides one) and up to four marked lances ``(position, progress)``.
+        """
+        self.q_rgba[Q_RADAR_SELF: HUD_QUADS, 3] = 0.0
+        if self.minimap_bounds is None or own is None:
+            return
+        me = self._radar_point(np.asarray(own)[[0, 2]])[0]
+        heading = np.array([math.sin(yaw), math.cos(yaw)])
+        self.q_pos[Q_RADAR_SELF: Q_RADAR_SELF + 2] = (me, me + heading * 0.0085)
+        self.q_half[Q_RADAR_SELF: Q_RADAR_SELF + 2] = ((0.0040, 0.0040), (0.0011, 0.0062))
+        self.q_rot[Q_RADAR_SELF: Q_RADAR_SELF + 2] = yaw
+        self.q_rgba[Q_RADAR_SELF: Q_RADAR_SELF + 2] = (1.0, 1.0, 1.0, 1.0)
+        n = min(len(others), RADAR_DOTS)
+        if n:
+            spots = slice(Q_RADAR_DOTS, Q_RADAR_DOTS + n)
+            self.q_pos[spots] = self._radar_point(np.asarray(others, dtype=np.float64)[:n][:, [0, 2]])
+            self.q_half[spots] = (0.0033, 0.0033)
+            self.q_rot[spots] = math.pi / 4.0
+            self.q_rgba[spots] = np.asarray(colors, dtype=np.float64)[:n]
+        reach = C.LANCE_RADIUS / self.minimap_bounds[2] * MINIMAP_SIZE
+        for i, (position, progress) in enumerate(list(strikes)[:RADAR_STRIKES]):
+            slot = Q_RADAR_STRIKES + i
+            self.q_pos[slot] = self._radar_point(np.asarray(position)[[0, 2]])[0]
+            self.q_half[slot] = (reach * 0.72, reach * 0.72)
+            self.q_rot[slot] = math.pi / 4.0
+            self.q_rgba[slot] = (1.0, 0.16, 0.10, 0.25 + 0.35 * pulse * (0.5 + 0.5 * progress))
+
+    # ---- shield, scorestreaks, recap, alerts -----------------------------------------------------------------
+    def set_shield(self, points: float, maximum: float) -> None:
+        fraction = min(max(points / max(maximum, 1.0), 0.0), 1.0)
+        if fraction > 0.0:
+            self._bar(Q_SHIELD, self.health_left, -0.4335, HEALTH_WIDTH * fraction, 0.004, HUD_CYAN, 0.95)
+        else:
+            self.q_rgba[Q_SHIELD, 3] = 0.0
+        self._set(self.shield_text, ("+%d" % math.ceil(points)) if points >= 0.5 else "")
+
+    def set_streak(self, line: str, ready: str) -> None:
+        self._set(self.streak_text, line)
+        self._set(self.ready_text, ready)
+
+    def set_recap(self, text: str) -> None:
+        self._set(self.recap_text, text)
+
+    def set_alert(self, text: str, rgb=HUD_CRIMSON) -> None:
+        self._set(self.alert_text, text)
+        if text:
+            self._color(self.alert_text, rgb)
 
     def set_match(self, mode: int, scores, seconds_left: int, own_team: int, own_kills: int, limit: int,
                   own_step: int = 0, detail: str = "") -> None:

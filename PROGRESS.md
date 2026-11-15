@@ -17,8 +17,10 @@ gespeicherte Fortschritt; `README.md` beschreibt das Spiel selbst.
 | Frame-Pacing | Vsync standardmäßig aus, Limiter 144 fps, dynamische Auflösung (Ziel 60 fps), automatischer Preset-Rückfall, Cursor-Picking nur in Menüs |
 | Stabilität | Rückstoß-/Landefeder im Kamera-Rig implizit integriert (vorher bei <= 10 fps divergent, Bild wurde einfarbig); Client-Keep-alive während des Erst-Backens |
 | Spielmodi | TEAM DEATHMATCH, FREE FOR ALL und neu ESCALATION: Waffenleiter über alle 29 Waffen (`config.ESCALATION_LADDER`), jeder Waffen-Kill gibt die nächste Waffe, ein Kill mit der letzten gewinnt, Beil-Kills stehlen eine Stufe, Selbst-Kills kosten eine; `weapons.validate_escalation()` leer |
-| Netcode | Owner-State überträgt das komplette Loadout (Waffen + Upgrade-Stufen), Protokoll-Version 12 |
-| Tests | 127 bestanden (`python -m pytest tests -q` und `python tests/run_all.py`), davon 2 gerenderte Läufe unter xvfb |
+| Scorestreaks | PULSE SCAN (3 Kills, Gegner auf der Minimap), AEGIS SHIELD (5 Kills, 50er Überschild), ORBITAL LANCE (7 Kills, Schlag mit 2 s Vorwarnung); einmal pro Leben verdient, bleiben über den Tod hinaus, Einsatz mit X; nicht in ESCALATION; Bots nutzen sie; `streaks.validate_streaks()` leer |
+| Minimap und Death-Recap | Minimap aus der Arena-Geometrie gerastert (eigene Position, Trupp, Schuss-Pings, Scan, Lance-Gefahrenzone); Recap beim Tod: Waffe, Entfernung, Trefferbilanz, Restleben des Gegners |
+| Netcode | Owner-State überträgt das komplette Loadout (Waffen + Upgrade-Stufen) und den Streak-Zustand, Snapshots den Schild; Protokoll-Version 13 |
+| Tests | 140 bestanden (`python -m pytest tests -q` und `python tests/run_all.py`), davon 2 gerenderte Läufe unter xvfb |
 
 ## Messwerte (Container ohne GPU, Mesa llvmpipe, 1280x720, 8 Spieler, Listen-Server im selben Prozess)
 

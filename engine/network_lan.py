@@ -86,7 +86,8 @@ SNAP_HAS_OWNER = 1
 
 ENT_T = np.dtype([("px", "<i2"), ("py", "<i2"), ("pz", "<i2"), ("vx", "<i2"), ("vy", "<i2"), ("vz", "<i2")])
 ENT_O = np.dtype([("yaw", "<u2"), ("pitch", "<i2")])
-ENT_S = np.dtype([("flags", "u1"), ("health", "u1"), ("weapon", "u1"), ("crouch", "u1"), ("seq", "u1"), ("team", "u1")])
+ENT_S = np.dtype([("flags", "u1"), ("health", "u1"), ("weapon", "u1"), ("crouch", "u1"), ("seq", "u1"), ("team", "u1"),
+                  ("shield", "u1")])
 
 EF_ALIVE, EF_GROUND, EF_CROUCH, EF_SLIDE, EF_SPRINT, EF_ADS, EF_RELOAD, EF_BOT = (1 << i for i in range(8))
 
@@ -101,6 +102,7 @@ _EVENT_FORMATS = {
     S.EV_STICK: struct.Struct("<BBhhh"),            # grenade id, target (255: a wall), position
     S.EV_STATUS: struct.Struct("<BH"),              # status, ticks
     S.EV_LADDER: struct.Struct("<BBBB"),            # player, step, cause, other player
+    S.EV_STREAK: struct.Struct("<BBBhhh"),          # player, reward, action, position
     S.EV_REWARD: struct.Struct("<IHB"),             # credits, xp, reason
     S.EV_MATCH: struct.Struct("<BBBBI"),            # phase, winner, map, mode, map crc
 }
@@ -244,6 +246,7 @@ def quantize_world(store: PlayerStore, tick: int) -> WorldFrame:
              | np.where(ws.reload_end > 0, EF_RELOAD, 0) | np.where(store.is_bot, EF_BOT, 0))
     frame.S["flags"] = flags.astype(np.uint8)
     frame.S["health"] = np.clip(np.ceil(store.health), 0, 255).astype(np.uint8)
+    frame.S["shield"] = np.clip(np.ceil(store.shield), 0, 255).astype(np.uint8)
     frame.S["weapon"] = ws.weapon[np.arange(n), ws.slot].astype(np.uint8)
     frame.S["crouch"] = np.clip(np.rint(mv.crouch_t * 255.0), 0, 255).astype(np.uint8)
     frame.S["seq"] = (store.spawn_seq & 0xFF).astype(np.uint8)
@@ -323,6 +326,8 @@ def encode_event(event: tuple) -> bytes:
         body = fmt.pack(event[2] & 0xFF, min(int(event[3]), 65535))
     elif kind == S.EV_LADDER:
         body = fmt.pack(event[1] & 0xFF, min(int(event[2]), 255), event[3] & 0xFF, event[4] & 0xFF)
+    elif kind == S.EV_STREAK:
+        body = fmt.pack(event[1] & 0xFF, event[2] & 0xFF, event[3] & 0xFF, *quantize_position(event[4]))
     elif kind == S.EV_REWARD:
         body = fmt.pack(int(event[2]) & 0xFFFFFFFF, min(int(event[3]), 65535), event[4])
     elif kind == S.EV_MATCH:
@@ -358,6 +363,8 @@ def decode_event(data: bytes, offset: int):
         event = (kind, f[0], f[1])
     elif kind == S.EV_LADDER:
         event = (kind, f[0], f[1], f[2], f[3])
+    elif kind == S.EV_STREAK:
+        event = (kind, f[0], f[1], f[2], _unq(f[3:6], C.POS_QUANT))
     elif kind == S.EV_REWARD:
         event = (kind, f[0], f[1], f[2])
     else:
@@ -1171,7 +1178,7 @@ class GameServer:
                 conn = by_pid.get(event[1])
                 if conn is not None:
                     self._queue_reliable(conn, blob)
-            elif kind in (S.EV_DAMAGE, S.EV_STATUS):
+            elif kind in (S.EV_DAMAGE, S.EV_STATUS) or (kind == S.EV_STREAK and event[3] == S.STREAK_EARNED):
                 conn = by_pid.get(event[1])
                 if conn is not None:
                     self._queue_reliable(conn, blob)
@@ -1346,6 +1353,7 @@ class Predictor:
         auth.unpack_owner(0, payload, offset)
         st.health[0] = auth.health[0]
         st.max_health[0] = auth.max_health[0]
+        st.copy_rewards(0, *auth.reward_state(0))            # shield, scan and streak: shown, never predicted
         self.acked_tick = ack_tick
         index = ack_tick % self.capacity
         diverged = True
@@ -1415,8 +1423,8 @@ class Predictor:
 class EntityView:
     """Interpolated remote entity state handed to the renderer."""
 
-    __slots__ = ("pos", "vel", "yaw", "pitch", "crouch", "flags", "health", "weapon", "team", "active", "alive",
-                 "render_ms", "fraction", "starved")
+    __slots__ = ("pos", "vel", "yaw", "pitch", "crouch", "flags", "health", "shield", "weapon", "team", "active",
+                 "alive", "render_ms", "fraction", "starved")
 
     def __init__(self, n: int):
         self.pos = np.zeros((n, 3))
@@ -1426,6 +1434,7 @@ class EntityView:
         self.crouch = np.zeros(n)
         self.flags = np.zeros(n, dtype=np.uint8)
         self.health = np.zeros(n)
+        self.shield = np.zeros(n)
         self.weapon = np.zeros(n, dtype=np.int64)
         self.team = np.zeros(n, dtype=np.int64)
         self.active = np.zeros(n, dtype=bool)
@@ -1519,6 +1528,7 @@ class InterpolationBuffer:
         near = np.where(w >= 0.5, sb, sa)
         view.flags[:] = near["flags"]
         view.health[:] = near["health"]
+        view.shield[:] = near["shield"]
         view.weapon[:] = near["weapon"]
         view.team[:] = near["team"]
         view.active[:] = np.where(w >= 0.5, self.active[b], self.active[a])

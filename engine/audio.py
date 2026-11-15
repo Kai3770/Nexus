@@ -177,6 +177,12 @@ SOUND_RECIPES = {
     "escalate": lambda: chime((659.0, 988.0), 0.12, 0.07),                    # ESCALATION: next gun
     "final_weapon": lambda: chime((523.0, 784.0, 1047.0, 1568.0), 0.16, 0.12),
     "demoted": lambda: chime((659.0, 494.0, 330.0), 0.16, 0.10),
+    "streak_ready": lambda: chime((880.0, 1175.0, 1568.0), 0.11, 0.09),               # scorestreaks
+    "scan": lambda: _mix(whoosh(0.7, 300.0, 3600.0, 301), chime((1319.0, 1760.0), 0.20, 0.18)),
+    "shield_up": lambda: _mix(whoosh(0.4, 250.0, 2600.0, 302), chime((523.0, 784.0, 1047.0), 0.12, 0.10)),
+    "shield_break": lambda: _mix(click(0.08, 3200.0, 303, 0.9), crackle(0.45, 304)),
+    "lance_mark": lambda: _mix(buzz(0.9, 196.0), chime((440.0, 466.0), 0.30, 0.25)),
+    "lance_impact": lambda: _mix(explosion(1.9, 305), thud(0.6, 55.0, 306, 0.2)),
 }
 
 
