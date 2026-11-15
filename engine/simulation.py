@@ -895,7 +895,8 @@ class GameWorld:
         owner = self.uplink_owner
         home = np.where(owner == 0, -1.0, np.where(owner == 1, 1.0, 0.0))
         idle = (n0 == 0) & (n1 == 0)
-        settle = np.clip(home - self.uplink_charge, -step, step) * np.where(owner >= 0, 1.0, 0.5)
+        limit = step * np.where(owner >= 0, 1.0, 0.5)                   # held recharge, neutral drains at half speed
+        settle = np.clip(home - self.uplink_charge, -limit, limit)          # ... and lands exactly on the target
         push = np.where(self.uplink_contested, 0.0, (rate(n1) - rate(n0)) * step)
         charge = np.clip(np.where(idle, self.uplink_charge + settle, self.uplink_charge + push), -1.0, 1.0)
         for zone in range(charge.size):
