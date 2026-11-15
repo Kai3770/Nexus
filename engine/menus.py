@@ -158,6 +158,7 @@ class SetupScreen(Screen):
             self.button("-", 0.02, y, 0.05, 0.055, lambda k=key: self.step(k, -1))
             self.rows[key] = self.label("", 0.21, y, 1.1, (0, 0))
             self.button("+", 0.40, y, 0.05, 0.055, lambda k=key: self.step(k, 1))
+        self.mode_info = self.label("", 0.0, 0.088, 0.62, (0, 0), COL_DIM)
         self.info = self.label("", 0.0, -0.135, 0.8, (0, 0), COL_DIM)
         self.kind = self.label("", 0.0, 0.335, 0.9, (0, 0), COL_DIM)
         self.button("START MATCH", 0.0, -0.215, 0.36, 0.065, self.start, COL_GOOD, 1.1)
@@ -177,6 +178,7 @@ class SetupScreen(Screen):
     def refresh(self) -> None:
         self.set_text(self.rows["ARENA"], maps.MAP_NAMES[self.map_index])
         self.set_text(self.rows["MODE"], C.MODE_NAMES[self.mode])
+        self.set_text(self.mode_info, C.MODE_DESCRIPTIONS[self.mode % len(C.MODE_DESCRIPTIONS)])
         self.set_text(self.rows["BOTS"], str(self.bots))
         self.set_text(self.rows["DIFFICULTY"], DIFFICULTY_NAMES[self.difficulty])
         self.set_text(self.info, maps.get_map_data(self.map_index).description)
@@ -509,7 +511,7 @@ class SettingsScreen(Screen):
         self.button("APPLY", 0.40, -0.225, 0.12, 0.046, self.apply_name, COL_GOOD, 0.8)
         self.label("Controls:  WASD move   SHIFT sprint   C / CTRL crouch + slide   SPACE jump   LMB fire   RMB aim",
                    0.0, -0.285, 0.60, (0, 0), COL_DIM)
-        self.label("R reload   Q swap weapon   G pulse grenade   TAB scoreboard   ESC pause", 0.0, -0.312, 0.60, (0, 0), COL_DIM)
+        self.label("R reload   Q swap weapon   G lethal   F tactical   TAB scoreboard   ESC pause", 0.0, -0.312, 0.60, (0, 0), COL_DIM)
         self.back_button()
 
     def change(self, key: str, direction: int) -> None:
@@ -648,7 +650,11 @@ class EquipmentScreen(Screen):
         self.tint(self.action, colour)
         self.set_text(self.loadout, "YOUR LOADOUT:   %s   +   %s" % (
             EQ.EQUIP_NAMES[EQ.EQUIP_INDEX[profile.equipment[0]]], EQ.EQUIP_NAMES[EQ.EQUIP_INDEX[profile.equipment[1]]]))
-        self.set_text(self.note, "In a match, changes take effect when you respawn." if self.game.in_match() else "")
+        if self.game.match_mode() == C.MODE_ESC:
+            note = "ESCALATION: the lethal is always the %s" % EQ.EQUIP_NAMES[EQ.EQUIP_INDEX[C.ESCALATION_LETHAL]]
+        else:
+            note = "In a match, changes take effect when you respawn." if self.game.in_match() else ""
+        self.set_text(self.note, note)
 
 
 class PauseScreen(Screen):

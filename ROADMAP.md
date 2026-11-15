@@ -1,0 +1,78 @@
+# NEXUS-3D-EXTREME – Roadmap
+
+Stand: 15.11.2026, nach Sprint 1. Geplant aus einer Code-Analyse (Knowledge-Graph mit graphify:
+1472 Knoten, 3349 Kanten, 81 Module-Gruppen, keine Import-Zyklen) und Bot-Messungen.
+
+## Bestandsaufnahme
+
+**Stark:** deterministischer 60-Hz-Netcode mit Vorhersage, Rollback und Lag-Kompensation; 29 Waffen
+in einem geprüften Balance-Modell (TTK 300–500 ms); 7 Ausrüstungsteile; 5 Arenen als Daten;
+prozedurale Grafik und Sounds; Wirtschaft mit Sponsoren und Prestige; Bots in drei Stufen; über
+120 automatische Tests.
+
+**Lücken aus Spielersicht:**
+- Belohnungen für Serien gibt es nur als Punkte (keine Scorestreaks).
+- Keine Minimap, kein Death-Recap, kein Killcam, schlichtes Match-Ende ohne Auswertung.
+- Keine frei belegbaren Tasten, kein Controller.
+- Nur LAN, kein Spiel übers Internet.
+
+**Technische Schulden (aus dem Graphen):**
+- Zentrale Knoten: `NexusGame` (43 Verbindungen), `ProfileManager` (41), `GameWorld` (35).
+- Sehr große Dateien: `engine/renderer.py` (2600 Zeilen), `engine/network_lan.py` (1900 Zeilen).
+- Am lockersten zusammenhängend: Bewegung/Vorhersage und die Menü-Screens.
+- Offene Punkte aus PROGRESS.md: Listen-Server im eigenen Prozess, Kartenübertragung beim
+  Verbinden, Backen im Hintergrund, Messung auf echter Grafikhardware.
+
+## Wie priorisiert wird
+
+Nutzen für Spieler gegen Aufwand (S = bis ein Tag, M = wenige Tage, L = eine Woche oder mehr).
+Alles, was Spielregeln ändert, läuft entweder durch die gemeinsame Simulation
+(`simulate_commands`) oder als Server-Zustand über den Owner-State, damit Vorhersage und Server
+nie auseinanderlaufen. Balance-Prüfungen (`validate_balance`, `validate_equipment`,
+`validate_escalation`) bleiben leer. Nur eigene Namen und Inhalte.
+
+## Sprint 1 – erledigt
+
+| Thema | Ergebnis |
+| --- | --- |
+| Neuer Modus ESCALATION | Waffenleiter über alle 29 Waffen; jeder Waffen-Kill gibt die nächste Waffe, ein Kill mit der letzten gewinnt; Beil-Kills stehlen eine Stufe, Selbst-Kills kosten eine; Banner, Feed-Zeilen, Sounds, Scoreboard-Spalte, Beschreibung im Setup, `--mode esc` |
+| Netcode | Der Owner-State überträgt jetzt das komplette Loadout (Waffen + Upgrade-Stufen); vom Server vergebene Waffen kommen ohne Extra-Nachricht in der Vorhersage an |
+| Fehler behoben | Doppel-Kill mit einer Schrotsalve wurde der zweiten Waffe zugerechnet; Waffenwechsel zwischen zwei gleichen Waffen hätte Nachladen umgangen; Steuerungstext im Einstellungsmenü veraltet |
+| Tests | 12 neue Tests (Regeln, Codec, Vorhersage im Live-Netz, Bot-Matches) |
+
+## Sprint 2 – „Serien, die sich lohnen“ (Vorschlag)
+
+| Thema | Aufwand | Warum |
+| --- | --- | --- |
+| Minimap / Radar mit Teamkameraden und Schuss-Pings | M | Orientierung; Voraussetzung für Scan-Belohnungen |
+| Scorestreaks: drei eigene Belohnungen, z. B. PULSE SCAN (3 Kills, Gegner 8 s auf der Minimap), AEGIS SHIELD (5 Kills, Überschild), ORBITAL LANCE (7 Kills, markierter Schlag mit Vorwarnung) | L | Höhepunkte im Match, belohnt gutes Spiel |
+| Death-Recap: wer, womit, aus welcher Entfernung, erlittener Schaden | S | Sofort verständlich, warum man gestorben ist |
+
+## Sprint 3 – „Matchgefühl“
+
+| Thema | Aufwand |
+| --- | --- |
+| Auswertung am Match-Ende: MVP, Trefferquote, beste Serie, verdiente Credits/XP, Medaillen | S–M |
+| Modus UPLINK: drei Zonen pro Arena halten, Punkte pro Sekunde, Bots spielen auf Ziele | M–L |
+| Aufträge: tägliche und wöchentliche Herausforderungen mit Credits | M |
+
+## Sprint 4 – Technik und Hosting
+
+| Thema | Aufwand |
+| --- | --- |
+| Listen-Server in eigenen Prozess auslagern (Host-Framerate) | M–L |
+| Kartendefinition beim Verbinden übertragen statt Clients abzuweisen | M |
+| Erstes Backen einer Arena im Hintergrund-Thread | S–M |
+| Tests automatisch bei jedem Push (GitHub Actions, headless) | S |
+| `renderer.py` in ein Paket aufteilen (HUD, Post-FX, Effekt-Pools, Welt) und `NexusGame` in Teilsysteme (Eingabe, Effekte, Session) | M |
+
+## Später / Ideenspeicher
+
+- Killcam aus dem Snapshot-Verlauf (L), Zuschauermodus (M)
+- Freie Tastenbelegung und Controller (M)
+- Spieler kollidieren miteinander; echte Rampen statt Treppenstufen (je M, Netcode)
+- Rückstoß serverseitig prüfen (M, Anti-Cheat)
+- Waffen-Meisterschaft mit Tarnmustern aus den prozeduralen Texturen (M)
+- Aufsätze (Visiere, Griffe, Magazine) – nur mit Erweiterung des Balance-Modells (L)
+- Karteneditor im Spiel (L), Spiel übers Internet mit Relay (L)
+- Windows-Build per PyInstaller (M), Messung auf echter Grafikhardware

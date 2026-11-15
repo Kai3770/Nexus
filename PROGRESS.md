@@ -16,7 +16,9 @@ gespeicherte Fortschritt; `README.md` beschreibt das Spiel selbst.
 | Renderer | `engine/renderer.py` neu: Material-Texturarrays, Normal-Mapping, Sonnenschatten (statisch + dynamisch), gebackene Lampen + AO, Himmelspanorama, 3D-Skyline, Bloom, gebündelte Pools und HUD |
 | Frame-Pacing | Vsync standardmäßig aus, Limiter 144 fps, dynamische Auflösung (Ziel 60 fps), automatischer Preset-Rückfall, Cursor-Picking nur in Menüs |
 | Stabilität | Rückstoß-/Landefeder im Kamera-Rig implizit integriert (vorher bei <= 10 fps divergent, Bild wurde einfarbig); Client-Keep-alive während des Erst-Backens |
-| Tests | 115 bestanden (`python -m pytest tests -q` und `python tests/run_all.py`), davon 2 gerenderte Läufe unter xvfb |
+| Spielmodi | TEAM DEATHMATCH, FREE FOR ALL und neu ESCALATION: Waffenleiter über alle 29 Waffen (`config.ESCALATION_LADDER`), jeder Waffen-Kill gibt die nächste Waffe, ein Kill mit der letzten gewinnt, Beil-Kills stehlen eine Stufe, Selbst-Kills kosten eine; `weapons.validate_escalation()` leer |
+| Netcode | Owner-State überträgt das komplette Loadout (Waffen + Upgrade-Stufen), Protokoll-Version 12 |
+| Tests | 127 bestanden (`python -m pytest tests -q` und `python tests/run_all.py`), davon 2 gerenderte Läufe unter xvfb |
 
 ## Messwerte (Container ohne GPU, Mesa llvmpipe, 1280x720, 8 Spieler, Listen-Server im selben Prozess)
 
@@ -42,10 +44,12 @@ Auf echter Grafikhardware wurde nicht gemessen.
 
 ## Offen / nächste Schritte
 
+Die priorisierte Planung (Sprints 2 bis 4 und Ideenspeicher) steht in `ROADMAP.md`. Technisch offen:
+
 1. Listen-Server in einen eigenen Prozess auslagern (`engine/network_lan.py`), damit er dem
    Render-Thread keine Interpreter-Zeit nimmt.
 2. Kartendefinition beim Verbinden vom Server übertragen, statt Clients ohne die Karte abzuweisen.
 3. Erstes Backen einer Arena (bis ca. 6 s auf ULTRA) in einen Hintergrund-Thread verlegen.
 4. Auf echter Hardware messen und die Presets danach justieren.
 
-Nichts davon ist committet oder gepusht; der Klon von `Kai3770/Nexus` ist nur lesend eingebunden.
+Alle Stände sind auf dem Branch `claude/aaa-refactor` von `Kai3770/Nexus` committet und gepusht.

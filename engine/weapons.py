@@ -280,6 +280,57 @@ def validate_balance() -> list:
 
 
 # --------------------------------------------------------------------------- #
+#  ESCALATION ladder
+# --------------------------------------------------------------------------- #
+ESCALATION_LADDER = tuple(WEAPON_INDEX[key] for key in C.ESCALATION_LADDER if key in WEAPON_INDEX)
+ESCALATION_STEPS = len(ESCALATION_LADDER)
+ESCALATION_STEP_OF = {weapon: step for step, weapon in enumerate(ESCALATION_LADDER)}
+
+
+def escalation_weapon(step: int) -> int:
+    """Weapon index held on ladder ``step`` (clamped: past the end it stays the last weapon)."""
+    return int(ESCALATION_LADDER[min(max(int(step), 0), ESCALATION_STEPS - 1)])
+
+
+def validate_escalation() -> list:
+    """Problems with ``config.ESCALATION_LADDER`` / ``ESCALATION_LETHAL`` (empty when sound)."""
+    problems = []
+    unknown = [key for key in C.ESCALATION_LADDER if key not in WEAPON_INDEX]
+    if unknown:
+        problems.append("unknown weapon keys in ESCALATION_LADDER: %s" % ", ".join(unknown))
+    repeated = sorted({key for key in C.ESCALATION_LADDER if C.ESCALATION_LADDER.count(key) > 1})
+    if repeated:
+        problems.append("weapons listed twice in ESCALATION_LADDER: %s" % ", ".join(repeated))
+    if not 2 <= ESCALATION_STEPS <= 255:
+        problems.append("the ESCALATION ladder needs 2 to 255 steps, it has %d" % ESCALATION_STEPS)
+    lethals = [row[0] for row in C.EQUIPMENT_TABLE if row[2] == C.EQUIP_LETHAL]
+    if C.ESCALATION_LETHAL not in lethals:
+        problems.append("ESCALATION_LETHAL %r is not a lethal equipment key" % (C.ESCALATION_LETHAL,))
+    return problems
+
+
+# --------------------------------------------------------------------------- #
+#  Compact loadout levels (4 bits per upgrade) for the per-snapshot owner state
+# --------------------------------------------------------------------------- #
+LEVEL_BITS = 4
+assert int(UPGRADE_MAX.max()) < (1 << LEVEL_BITS), "upgrade levels must fit in four bits"
+assert LOADOUT_SLOTS * UPGRADE_COUNT * LEVEL_BITS <= 64, "packed loadout levels must fit in 64 bits"
+_LEVEL_SHIFTS = np.arange(LOADOUT_SLOTS * UPGRADE_COUNT, dtype=np.uint64) * np.uint64(LEVEL_BITS)
+
+
+def pack_levels(levels) -> int:
+    """Every upgrade level of a loadout as one unsigned 64-bit integer."""
+    flat = clamp_levels(np.asarray(levels).reshape(LOADOUT_SLOTS, UPGRADE_COUNT)).reshape(-1).astype(np.uint64)
+    return int(np.bitwise_or.reduce(flat << _LEVEL_SHIFTS))
+
+
+def unpack_levels(value: int) -> np.ndarray:
+    """Inverse of :func:`pack_levels`: ``(LOADOUT_SLOTS, UPGRADE_COUNT)`` clamped levels."""
+    flat = (np.uint64(int(value) & 0xFFFFFFFFFFFFFFFF) >> _LEVEL_SHIFTS) & np.uint64((1 << LEVEL_BITS) - 1)
+    return clamp_levels(flat.astype(np.int64).reshape(LOADOUT_SLOTS, UPGRADE_COUNT))
+
+
+# --------------------------------------------------------------------------- #
 #  Weapon state (structure of arrays) and its deterministic step
 # --------------------------------------------------------------------------- #
 class WeaponState:
@@ -371,6 +422,7 @@ def step_weapons(ws: WeaponState, rows, buttons, cmd_tick, active, dt: float = C
     shoot_down = (buttons & C.BTN_SHOOT) != 0
     shoot_pressed = shoot_down & ((prev & C.BTN_SHOOT) == 0)
     swap_pressed = ((buttons & C.BTN_SWAP) != 0) & ((prev & C.BTN_SWAP) == 0) & active
+    swap_pressed &= ws.weapon[rows, 0] != ws.weapon[rows, 1]     # both slots hold the same gun: nothing to swap to
     reload_pressed = ((buttons & C.BTN_RELOAD) != 0) & ((prev & C.BTN_RELOAD) == 0)
 
     # ---- weapon swap ------------------------------------------------------

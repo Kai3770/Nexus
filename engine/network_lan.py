@@ -100,6 +100,7 @@ _EVENT_FORMATS = {
     S.EV_GRENADE: struct.Struct("<BBhhhhhhHIB"),    # id, owner, position, velocity, fuse, spawn tick, equipment
     S.EV_STICK: struct.Struct("<BBhhh"),            # grenade id, target (255: a wall), position
     S.EV_STATUS: struct.Struct("<BH"),              # status, ticks
+    S.EV_LADDER: struct.Struct("<BBBB"),            # player, step, cause, other player
     S.EV_REWARD: struct.Struct("<IHB"),             # credits, xp, reason
     S.EV_MATCH: struct.Struct("<BBBBI"),            # phase, winner, map, mode, map crc
 }
@@ -320,6 +321,8 @@ def encode_event(event: tuple) -> bytes:
         body = fmt.pack(event[1] & 0xFF, event[2] & 0xFF, *quantize_position(event[3]))
     elif kind == S.EV_STATUS:
         body = fmt.pack(event[2] & 0xFF, min(int(event[3]), 65535))
+    elif kind == S.EV_LADDER:
+        body = fmt.pack(event[1] & 0xFF, min(int(event[2]), 255), event[3] & 0xFF, event[4] & 0xFF)
     elif kind == S.EV_REWARD:
         body = fmt.pack(int(event[2]) & 0xFFFFFFFF, min(int(event[3]), 65535), event[4])
     elif kind == S.EV_MATCH:
@@ -353,6 +356,8 @@ def decode_event(data: bytes, offset: int):
         event = (kind, f[0], f[1], _unq(f[2:5], C.POS_QUANT))
     elif kind == S.EV_STATUS:
         event = (kind, f[0], f[1])
+    elif kind == S.EV_LADDER:
+        event = (kind, f[0], f[1], f[2], f[3])
     elif kind == S.EV_REWARD:
         event = (kind, f[0], f[1], f[2])
     else:
@@ -1355,6 +1360,8 @@ class Predictor:
                            and int(self.c_weapon[index, 1]) == int(auth.weapons.ammo[0, slot])
                            and int(self.c_weapon[index, 2]) == int(auth.weapons.reload_end[0])
                            and int(self.c_weapon[index, 3]) == int(auth.alive[0]))
+            same_loadout = (np.array_equal(st.weapons.weapon[0], auth.weapons.weapon[0])
+                            and np.array_equal(st.weapons.levels[0], auth.weapons.levels[0]))
             same_equip = (int(self.c_equip[index, 0]) & 0xFFFFFFFF == int(auth.ability_ready[0])
                           and int(self.c_equip[index, 1]) & 0xFFFFFFFF == int(auth.tactical_ready[0])
                           and int(self.c_equip[index, 2]) & 0xFFFFFFFF == int(auth.stun_until[0])
@@ -1362,7 +1369,7 @@ class Predictor:
             self.last_error = error
             self.max_error = max(self.max_error, error)
             diverged = (error > C.RECONCILE_THRESHOLD or float(np.sqrt(np.dot(dv, dv))) > C.RECONCILE_VELOCITY_THRESHOLD
-                        or not same_flags or not same_weapon or not same_equip)
+                        or not same_flags or not same_weapon or not same_equip or not same_loadout)
         if not diverged:
             st.spawn_seq[0] = auth.spawn_seq[0]
             return False

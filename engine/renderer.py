@@ -2536,10 +2536,14 @@ class HUD:
         self._set(self.ability_text, "%s [G]" % lethal_name)
         self._set(self.tactical_text, "%s [F]" % tactical_name)
 
-    def set_match(self, mode: int, scores, seconds_left: int, own_team: int, own_kills: int, limit: int) -> None:
+    def set_match(self, mode: int, scores, seconds_left: int, own_team: int, own_kills: int, limit: int,
+                  own_step: int = 0, detail: str = "") -> None:
         minutes, seconds = divmod(max(int(seconds_left), 0), 60)
         clock = "%02d:%02d" % (minutes, seconds)
-        if mode == C.MODE_TDM:
+        if mode == C.MODE_ESC:
+            self._set(self.score_text, "WEAPON  %d / %d   |   %s" % (min(own_step + 1, limit), limit, clock))
+            self._set(self.mode_text, ("%s  -  %s" % (C.MODE_NAMES[mode], detail)) if detail else C.MODE_NAMES[mode])
+        elif mode == C.MODE_TDM:
             self._set(self.score_text, "%s  %d   |   %s   |   %d  %s" % (C.TEAM_NAMES[0], scores[0], clock, scores[1],
                                                                         C.TEAM_NAMES[1]))
             self._set(self.mode_text, "%s  -  FIRST TO %d  -  YOU FIGHT FOR %s" % (C.MODE_NAMES[mode], limit,
@@ -2564,19 +2568,19 @@ class HUD:
     def set_net(self, text: str) -> None:
         self._set(self.net_text, text)
 
-    def set_scoreboard(self, visible: bool, rows=None, title: str = "SCOREBOARD") -> None:
+    def set_scoreboard(self, visible: bool, rows=None, title: str = "SCOREBOARD", score_label: str = "SCORE") -> None:
         """``rows`` is a list of ``(name, kills, deaths, score, ping, tag)`` already sorted."""
         if self.board.enabled != visible:
             self.board.enabled = visible
         if not visible or rows is None:
             return
-        stamp = (title, tuple(rows))
+        stamp = (title, score_label, tuple(rows))
         if stamp == self._board_stamp:
             return
         self._board_stamp = stamp
         self.board_title.text = title
         self.board_names.text = "\n".join(["PLAYER", ""] + ["%s%s" % (row[5], row[0]) for row in rows])
-        self.board_stats.text = "\n".join(["K  /  D        SCORE        PING", ""] + [
+        self.board_stats.text = "\n".join(["K  /  D        %-6s       PING" % score_label, ""] + [
             "%-3d /  %-3d        %-6d        %s" % (row[1], row[2], row[3], ("%d ms" % row[4]) if row[4] else "-")
             for row in rows])
 

@@ -112,7 +112,7 @@ BROADCAST_ADDRESS = "255.255.255.255"
 BEACON_INTERVAL = 1.0
 BEACON_EXPIRY = 3.5
 PROTOCOL_MAGIC = 0x584E
-PROTOCOL_VERSION = 11
+PROTOCOL_VERSION = 12
 MAX_DATAGRAM = 1200
 RECV_BUFFER = 4096
 CONNECT_RETRY_INTERVAL = 0.25
@@ -475,6 +475,7 @@ AUDIO_CATEGORY = {
     "respawn": "announcer", "level_up": "announcer", "victory": "announcer", "defeat": "announcer",
     "hatchet": "movement", "hatchet_hit": "impact", "stick": "feedback", "fire": "explosion", "shock": "explosion",
     "smoke": "explosion", "stim": "feedback", "stun_ring": "feedback",
+    "escalate": "announcer", "final_weapon": "announcer", "demoted": "announcer",
 }
 AUDIO_MIN_GAIN = 0.003                   # quieter cues are not started at all
 AUDIO_DUCK_WINDOW = 0.07                 # seconds; overlapping cues of one category are attenuated
@@ -486,12 +487,35 @@ AUDIO_PAN_STRENGTH = 0.8
 # --------------------------------------------------------------------------- #
 MODE_TDM = 0
 MODE_FFA = 1
-MODE_NAMES = ("TEAM DEATHMATCH", "FREE FOR ALL")
+MODE_ESC = 2
+MODE_NAMES = ("TEAM DEATHMATCH", "FREE FOR ALL", "ESCALATION")
+MODE_DESCRIPTIONS = (
+    "Two squads, first to the score limit - your own loadout and equipment",
+    "Everyone for themselves, first to the elimination limit - your own loadout",
+    "Every kill hands you the next gun, a kill with the last one wins - hatchet kills steal a step",
+)
 PHASE_WARMUP = 0
 PHASE_LIVE = 1
 PHASE_ENDED = 2
 TDM_SCORE_LIMIT = 75
 FFA_SCORE_LIMIT = 30
+
+# ESCALATION: one stock weapon at a time, both loadout slots hold it (swapping is a no-op).  Any gun kill moves
+# the killer one step up; a RAZOR HATCHET kill also drops the victim one step; dying by your own hand (falling,
+# own grenade) costs one step.  The ladder runs from forgiving automatics through shotguns and long guns to the
+# pistols; a kill with the last entry wins the match.  Edit the order freely: every key must be a weapon key and
+# ``weapons.validate_escalation()`` checks it.
+ESCALATION_LADDER = (
+    "hornet", "vanguard", "wraith", "kestrel", "midge", "axiom", "shrike", "sparrow", "tempest", "basalt",
+    "bulwark", "heron", "mammoth", "cyclone",
+    "breacher", "badger", "gavel", "twinfang",
+    "longbow", "sentry", "ranger",
+    "aurora", "osprey", "halberd",
+    "viper", "sidekick", "warden", "anvil", "verdict",
+)
+ESCALATION_LETHAL = "hatchet"           # equipment key every player throws in ESCALATION
+ESCALATION_STEAL = 1                    # steps a hatchet kill takes from the victim
+ESCALATION_SUICIDE_PENALTY = 1          # steps lost when you kill yourself
 MATCH_TIME_LIMIT = 600.0
 INTERMISSION_TIME = 12.0
 TEAM_NAMES = ("VANTA", "HELIX")

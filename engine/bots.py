@@ -23,6 +23,7 @@ from . import config as C
 from . import equipment as EQ
 from . import mathx as M
 from . import simulation as S
+from . import weapons as W
 from .controller_3d import eye_height
 
 DIFFICULTY_NAMES = ("RECRUIT", "REGULAR", "VETERAN")
@@ -344,7 +345,7 @@ def run_bot_match(map_key="crucible", bots: int = 8, ticks: int = 3600, difficul
         game.add_player("BOT-%02d" % index, is_bot=True)
     controller = BotController(game, difficulty, seed=seed + 1)
     game.drain_events()
-    shots = hits = kills = explosions = void_deaths = 0
+    shots = hits = kills = explosions = void_deaths = ladder_events = 0
     worst = 0.0
     started = time.perf_counter()
     for _ in range(ticks):
@@ -362,6 +363,7 @@ def run_bot_match(map_key="crucible", bots: int = 8, ticks: int = 3600, difficul
             hits += kind == S.EV_HIT
             kills += kind == S.EV_KILL
             explosions += kind == S.EV_EXPLOSION
+            ladder_events += kind == S.EV_LADDER
             void_deaths += kind == S.EV_KILL and bool(event[4] & S.KILL_SUICIDE) and event[3] == 0
         worst = max(worst, time.perf_counter() - t0)
     elapsed = time.perf_counter() - started
@@ -373,4 +375,8 @@ def run_bot_match(map_key="crucible", bots: int = 8, ticks: int = 3600, difficul
         "min_y": float(store.move.pos[store.active & store.alive, 1].min()) if np.any(store.active & store.alive) else 0.0,
         "void_deaths": int(void_deaths), "finite": bool(np.isfinite(store.move.pos).all()),
         "kills_per_bot": store.kills[store.active].tolist(), "deaths_per_bot": store.deaths[store.active].tolist(),
+        "ladder": game.ladder[store.active].tolist(), "ladder_events": int(ladder_events),
+        "ladder_ok": bool(mode != C.MODE_ESC or all(
+            tuple(store.weapons.weapon[row]) == (W.escalation_weapon(game.ladder[row]),) * 2
+            for row in store.active_rows().tolist())),
     }

@@ -19,6 +19,7 @@ python main.py
 | Command | What it does |
 | --- | --- |
 | `python main.py --solo terminal --mode ffa --bots 5` | Jump straight into a solo match |
+| `python main.py --solo crucible --mode esc` | ESCALATION: climb the ladder of all 29 guns |
 | `python main.py --host datacore` | Host a LAN match (advertised automatically) and join it |
 | `python main.py --connect 10.0.0.7` | Join by address (normally not needed, see the LAN lobby) |
 | `python main.py --quality 1 --fps-limit 60` | Override the saved graphics settings for one run |
@@ -37,8 +38,26 @@ beacon to `255.255.255.255:28015` once per second. Everybody else opens **JOIN L
 clicks the match. Gameplay traffic uses UDP 28016 (the next free port if that one is taken), so
 allow UDP 28015 and 28016 through the local firewall.
 
-Modes: Team Deathmatch (VANTA vs HELIX) and Free For All on five arenas (DATACORE, SKYBRIDGE,
-CRUCIBLE, TERMINAL, ATRIUM). The server tops the match up with bots (three difficulty levels).
+Modes: Team Deathmatch (VANTA vs HELIX), Free For All and ESCALATION on five arenas (DATACORE,
+SKYBRIDGE, CRUCIBLE, TERMINAL, ATRIUM). The server tops the match up with bots (three difficulty levels).
+
+## ESCALATION
+
+A weapon ladder. Everybody starts with the same stock gun in both slots (swapping does nothing),
+and every kill with a gun hands the killer the next one, with a full magazine. A kill with the last
+gun wins the match; at the time limit the player furthest up wins (kills break ties). The lethal
+slot is always the **RAZOR HATCHET**: a hatchet kill also climbs, and drops the victim one step
+("stole a step"). Killing yourself (falling, your own blast) costs a step. Nobody drops below the
+first gun, and your own loadout and upgrades stay out of it, so the mode is fair for new profiles.
+
+The ladder runs through all 29 weapons: automatics first, then LMGs and shotguns, marksman rifles
+and snipers, and the pistols at the top. It is data, `ESCALATION_LADDER` in `engine/config.py`;
+reorder or shorten it freely, `weapons.validate_escalation()` reports unknown or doubled keys.
+In bot matches the first player finishes after roughly two and a half to four minutes.
+
+The HUD shows `WEAPON n / 29` and the leader, a banner announces every new gun (and the final one),
+the kill feed reports stolen steps, and the scoreboard lists the weapon number instead of the score.
+Planned work is in `ROADMAP.md` (German).
 
 ## Arenas are data
 
@@ -202,6 +221,9 @@ A host can run a level playing field with `dedicated_server.py --no-upgrades`.
   keeps every unacknowledged command. When the server's state for an acknowledged command
   differs from the prediction by more than 0.05 units (or in velocity, flags or weapon state),
   the client adopts the server state and replays all pending commands inside that frame.
+  That owner state also carries the complete loadout (both weapon ids and every upgrade level),
+  so a gun the server hands out -- the ESCALATION ladder -- reaches the prediction with the next
+  snapshot, without a separate message that could arrive out of order.
 * **Interpolation.** Other players are drawn 100 ms in the past, positions interpolated linearly
   and orientations with quaternion SLERP between the two snapshots around that time.
 * **Lag compensation.** Every shot carries a FIRE record with the client's view timestamp. The
@@ -227,13 +249,15 @@ python -m pytest tests -q
 python tests/run_all.py
 ```
 
-The second command needs no pytest. 115 tests cover the math, the octree against a brute-force
+The second command needs no pytest. 127 tests cover the math, the octree against a brute-force
 reference, movement, weapons and the balance model, the simulation, all arenas and the injector
 (run-time registration, JSON drop-ins, malformed definitions, checksums), navigation on every
 storey, bot-only matches, the save system, wire codecs, rollback, live client / server sessions
 over loopback with latency, jitter and packet loss, a client that lacks the server's arena, the
 mixer, every equipment item (hatchet hits, charges sticking to players, fire, stuns, smoke against bots,
-stims, respawn-time class changes), procedural materials, light baking, dynamic resolution, camera springs at 10 fps, a client
+stims, respawn-time class changes), the ESCALATION ladder (climbing, stolen steps, a shotgun volley that
+kills twice, the winner, a live session in which the client predicts with the gun the server hands out,
+bot matches), procedural materials, light baking, dynamic resolution, camera springs at 10 fps, a client
 that stalls while baking, and two rendered end-to-end runs
 (under `xvfb-run` when there is no display; skipped if neither exists).
 

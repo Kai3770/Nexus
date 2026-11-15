@@ -50,6 +50,13 @@ EV_REWARD = 8       # (EV_REWARD, player, credits, xp, reason)
 EV_MATCH = 9        # (EV_MATCH, phase, winner, map_index, mode)
 EV_STICK = 10       # (EV_STICK, grenade_id, target player or NO_PLAYER for a wall, (x, y, z))
 EV_STATUS = 11      # (EV_STATUS, player, status, ticks)   status: C.STATUS_STUN or C.STATUS_STIM
+EV_LADDER = 12      # (EV_LADDER, player, step, cause, other player or NO_PLAYER)   ESCALATION progress
+
+LADDER_RESET = 0    # match start / join: not broadcast, every client resets on EV_MATCH
+LADDER_PROMOTED = 1  # gun kill: one step up                                (other = victim)
+LADDER_STEAL = 2    # hatchet kill: the killer moves up ...                 (other = victim)
+LADDER_STOLEN = 3   # ... and the victim moves down                        (other = killer)
+LADDER_SUICIDE = 4  # killed yourself: one step down
 
 KILL_HEADSHOT = 1
 KILL_EXPLOSIVE = 2
@@ -64,6 +71,7 @@ REWARD_NAMES = ("COMBAT", "ELIMINATION", "HEADSHOT", "VICTORY", "MATCH COMPLETE"
 
 WEAPON_GRENADE = 255                 # pseudo weapon id of kills by falling after a knock-back
 NO_PLAYER = 255
+ESC_LETHAL = EQ.EQUIP_INDEX[C.ESCALATION_LETHAL]     # equipment every player throws in ESCALATION
 
 _TICKS = C.TICK_RATE
 
@@ -74,7 +82,7 @@ _TICKS = C.TICK_RATE
 class PlayerStore:
     """All per-player state for ``capacity`` slots, one array per component."""
 
-    OWNER_STRUCT = struct.Struct("<3f3fHHH5f2fBHHIdfIIfBIHBBBII")
+    OWNER_STRUCT = struct.Struct("<3f3fHHH5f2fBHHIdfIIfBIHBBBIIBBQ")   # ... equipment, stun, weapons, levels
     OWNER_SIZE = OWNER_STRUCT.size
 
     def __init__(self, capacity: int = C.MAX_PLAYERS):
@@ -173,13 +181,19 @@ class PlayerStore:
             self.health[row], int(self.alive[row]), int(self.cmd_tick[row]) & 0xFFFFFFFF,
             int(round(self.max_health[row])), int(self.spawn_seq[row]) & 0xFF,
             int(self.equip[row, 0]), int(self.equip[row, 1]), int(self.tactical_ready[row]) & 0xFFFFFFFF,
-            int(self.stun_until[row]) & 0xFFFFFFFF)
+            int(self.stun_until[row]) & 0xFFFFFFFF,
+            int(ws.weapon[row, 0]) & 0xFF, int(ws.weapon[row, 1]) & 0xFF, W.pack_levels(ws.levels[row]))
 
     def unpack_owner(self, row: int, payload: bytes, offset: int = 0) -> None:
         (px, py, pz, vx, vy, vz, mflags, mprev, wprev, slide_t, slide_cd, crouch_t, air_t, jump_buf, sdx, sdz,
          slot, ammo0, ammo1, reload_end, next_fire, bloom, shots, ability_ready, health, alive, cmd_tick,
-         max_health, spawn_seq, lethal, tactical, tactical_ready, stun_until) = self.OWNER_STRUCT.unpack_from(payload, offset)
+         max_health, spawn_seq, lethal, tactical, tactical_ready, stun_until, weapon0, weapon1,
+         packed_levels) = self.OWNER_STRUCT.unpack_from(payload, offset)
         mv, ws = self.move, self.weapons
+        levels = W.unpack_levels(packed_levels)
+        if ((int(ws.weapon[row, 0]), int(ws.weapon[row, 1])) != (weapon0, weapon1)
+                or not np.array_equal(ws.levels[row], levels)):
+            ws.set_loadout(row, (weapon0, weapon1), levels)     # first: it resets the weapon timers set below
         mv.pos[row] = (px, py, pz)
         mv.vel[row] = (vx, vy, vz)
         mv.mflags[row] = mflags
@@ -447,9 +461,12 @@ class GameWorld:
         self.upgrades_enabled = bool(upgrades_enabled)
         self.score_limit = int(score_limit) if score_limit else (
             C.TDM_SCORE_LIMIT if self.mode == C.MODE_TDM else C.FFA_SCORE_LIMIT)
+        if self.mode == C.MODE_ESC:
+            self.score_limit = W.ESCALATION_STEPS            # completing the ladder is the only way to win
         self.time_limit = float(time_limit)
         self.rng = np.random.default_rng(seed)
         self.store = PlayerStore(capacity)
+        self.ladder = np.zeros(self.store.capacity, dtype=np.int64)     # ESCALATION step per player
         self.grenades = GrenadeStore()
         self.zones = ZoneStore()
         self.events: list = []
@@ -499,7 +516,7 @@ class GameWorld:
         s.weapons.shots_fired[row] = 0
         s.weapons.set_loadout(row, weapon_ids, levels)
         s.apply_operator(row, operator, prestige)
-        s.apply_equipment(row, EQ.DEFAULT_EQUIPMENT if equipment is None else equipment)
+        s.apply_equipment(row, self.mode_equipment(EQ.DEFAULT_EQUIPMENT if equipment is None else equipment))
         s.tactical_ready[row] = 0
         if self.mode == C.MODE_TDM:
             if team is None or team not in (0, 1):
@@ -508,6 +525,9 @@ class GameWorld:
             s.team[row] = team
         else:
             s.team[row] = 2 + row
+        self.ladder[row] = 0
+        if self.mode == C.MODE_ESC:
+            self.set_ladder_step(row, 0)
         self.spawn_player(row)
         return row
 
@@ -525,6 +545,7 @@ class GameWorld:
         s.is_bot[row] = False
         s.hitboxes.valid[row] = False
         s.names[row] = ""
+        self.ladder[row] = 0
 
     def humans(self) -> np.ndarray:
         s = self.store
@@ -569,8 +590,9 @@ class GameWorld:
         s.protect_until[row] = self.tick + int(C.SPAWN_PROTECTION * _TICKS)
         s.last_damage_tick[row] = -100000
         s.last_attacker[row] = -1
-        if (int(s.pending_equip[row, 0]), int(s.pending_equip[row, 1])) != (int(s.equip[row, 0]), int(s.equip[row, 1])):
-            s.apply_equipment(row, s.pending_equip[row])            # a new class: both items ready at once
+        wanted = self.mode_equipment(s.pending_equip[row])
+        if wanted != (int(s.equip[row, 0]), int(s.equip[row, 1])):
+            s.apply_equipment(row, wanted)                          # a new class: both items ready at once
             s.ability_ready[row] = s.cmd_tick[row]
             s.tactical_ready[row] = s.cmd_tick[row]
         else:
@@ -640,12 +662,13 @@ class GameWorld:
         victims = entity[struck]
         zones = HITBOX_ZONE[box[struck]]
         points = ends[struck]
+        fired_weapon = int(ws.weapon[row, slot])          # a kill can hand the shooter a new gun mid-volley
         for victim in np.unique(victims).tolist():
             mine = victims == victim
             total = float(damage[mine].sum())
             zone = int(zones[mine].min())
             point = points[mine][int(np.argmin(zones[mine]))]
-            self.apply_damage(int(victim), row, total, zone, int(ws.weapon[row, slot]), point)
+            self.apply_damage(int(victim), row, total, zone, fired_weapon, point)
 
     # ---- damage ---------------------------------------------------------------------------------------
     def apply_damage(self, victim: int, attacker: int, amount: float, zone: int, weapon: int, point,
@@ -700,6 +723,43 @@ class GameWorld:
             s.score[victim] = max(int(s.score[victim]) - 50, 0)
             killer = victim if attacker == victim else NO_PLAYER
         self.events.append((EV_KILL, killer, victim, weapon, flags))
+        if self.mode == C.MODE_ESC:
+            self._escalate(victim, attacker if hostile else NO_PLAYER, weapon)
+
+    # ---- ESCALATION ----------------------------------------------------------------------------------------
+    def mode_equipment(self, chosen) -> tuple:
+        """The ``(lethal, tactical)`` a player really carries: ESCALATION hands everybody the hatchet."""
+        lethal, tactical = EQ.sanitize(chosen)
+        if self.mode == C.MODE_ESC:
+            lethal = ESC_LETHAL
+        return int(lethal), int(tactical)
+
+    def set_ladder_step(self, row: int, step: int, cause: int = LADDER_RESET, other: int = NO_PLAYER) -> None:
+        """Put ``row`` on ladder ``step``: the stock weapon of that step in both slots, score = step."""
+        s = self.store
+        step = int(min(max(int(step), 0), W.ESCALATION_STEPS))
+        self.ladder[row] = step
+        s.score[row] = step
+        weapon = W.escalation_weapon(step)
+        ws = s.weapons
+        if int(ws.weapon[row, 0]) != weapon or int(ws.weapon[row, 1]) != weapon or ws.levels[row].any():
+            ws.set_loadout(row, (weapon, weapon), np.zeros((W.LOADOUT_SLOTS, W.UPGRADE_COUNT), dtype=np.int64))
+        if cause != LADDER_RESET:
+            self.events.append((EV_LADDER, row, step, cause, other))
+
+    def _escalate(self, victim: int, attacker: int, weapon: int) -> None:
+        """Ladder rules of one kill: gun kills climb, hatchet kills steal a step, suicides cost one."""
+        if attacker != NO_PLAYER:
+            hatchet = weapon == C.EQUIP_KILL_BASE + ESC_LETHAL
+            if weapon < W.WEAPON_COUNT or hatchet:
+                self.set_ladder_step(attacker, int(self.ladder[attacker]) + 1,
+                                     LADDER_STEAL if hatchet else LADDER_PROMOTED, victim)
+            if hatchet and self.ladder[victim] > 0:
+                self.set_ladder_step(victim, int(self.ladder[victim]) - C.ESCALATION_STEAL, LADDER_STOLEN, attacker)
+            self.store.score[attacker] = int(self.ladder[attacker])
+        elif self.ladder[victim] > 0:
+            self.set_ladder_step(victim, int(self.ladder[victim]) - C.ESCALATION_SUICIDE_PENALTY, LADDER_SUICIDE)
+        self.store.score[victim] = int(self.ladder[victim])
 
     # ---- equipment -------------------------------------------------------------------------------------------
     def throw_equipment(self, row: int, equip: int) -> int:
@@ -984,12 +1044,17 @@ class GameWorld:
         rows = s.active_rows()
         if rows.size == 0:
             return NO_PLAYER
+        if self.mode == C.MODE_ESC:                       # furthest up the ladder, kills break ties
+            return int(rows[int(np.argmax(self.ladder[rows] * 4096 + s.kills[rows]))])
         return int(rows[int(np.argmax(s.kills[rows]))])
 
     def _check_match_end(self) -> None:
         s = self.store
         if self.mode == C.MODE_TDM:
             reached = int(self.team_scores.max()) >= self.score_limit
+        elif self.mode == C.MODE_ESC:
+            rows = s.active_rows()
+            reached = rows.size > 0 and int(self.ladder[rows].max()) >= self.score_limit
         else:
             rows = s.active_rows()
             reached = rows.size > 0 and int(s.kills[rows].max()) >= self.score_limit
@@ -1022,6 +1087,10 @@ class GameWorld:
         s.score[:] = 0
         s.streak[:] = 0
         s.pending_credits[:] = 0.0
+        self.ladder[:] = 0
+        if self.mode == C.MODE_ESC:
+            for row in s.active_rows().tolist():
+                self.set_ladder_step(int(row), 0)
         self.events.append((EV_MATCH, self.phase, NO_PLAYER, self.map_index, self.mode))
         for row in s.active_rows().tolist():
             self.spawn_player(int(row))

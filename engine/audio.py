@@ -174,6 +174,9 @@ SOUND_RECIPES = {
     "level_up": lambda: chime((523.0, 659.0, 784.0, 1047.0), 0.22, 0.12),
     "victory": lambda: chime((523.0, 659.0, 784.0, 1047.0, 1319.0), 0.30, 0.18),
     "defeat": lambda: chime((392.0, 330.0, 262.0), 0.34, 0.20),
+    "escalate": lambda: chime((659.0, 988.0), 0.12, 0.07),                    # ESCALATION: next gun
+    "final_weapon": lambda: chime((523.0, 784.0, 1047.0, 1568.0), 0.16, 0.12),
+    "demoted": lambda: chime((659.0, 494.0, 330.0), 0.16, 0.10),
 }
 
 

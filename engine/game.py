@@ -167,7 +167,10 @@ class NexusGame:
         self.result = ""
         self.result_sub = ""
         self.banner = ""
+        self.banner_sub = ""
+        self.banner_rgb = R.HUD_GOLD
         self.banner_ttl = 0.0
+        self.death_note = ""
         self.orbit = 0.0
         self.last_corrections = 0
         self.backdrop_map = ""
@@ -610,6 +613,38 @@ class NexusGame:
     # ================================================================== #
     #  Server events -> feedback
     # ================================================================== #
+    def _show_banner(self, text: str, sub: str, rgb, ttl: float) -> None:
+        self.banner, self.banner_sub, self.banner_rgb, self.banner_ttl = text, sub, rgb, ttl
+
+    def match_mode(self):
+        """Mode of the match being played, or None outside a match."""
+        return self.client.mode if self.in_match() and self.client is not None else None
+
+    def _on_ladder(self, event: tuple) -> None:
+        """ESCALATION progress: banners for your own steps, feed lines for steals and final weapons."""
+        _, pid, step, cause, other = event
+        me, hud, audio = self.client.pid, self.hud, self.audio
+        steps = W.ESCALATION_STEPS
+        gun = W.WEAPON_NAMES[W.escalation_weapon(step)]
+        climbed = cause in (S.LADDER_PROMOTED, S.LADDER_STEAL)
+        if cause == S.LADDER_STOLEN:
+            hud.push_kill("%s  stole a step from  %s" % (self._name(other), self._name(pid)),
+                          R.HUD_GOLD if me in (pid, other) else R.HUD_WHITE)
+        if pid == me:
+            if climbed and step == steps - 1:
+                self._show_banner("FINAL WEAPON", "%s  -  one more kill wins" % gun, R.HUD_GOLD, 2.4)
+                audio.play("final_weapon", 0.8)
+            elif climbed and step < steps:
+                sub = gun if cause == S.LADDER_PROMOTED else "%s  -  stolen from %s" % (gun, self._name(other))
+                self._show_banner("WEAPON %d / %d" % (step + 1, steps), sub, R.HUD_WHITE, 1.6)
+                audio.play("escalate", 0.7)
+            elif not climbed:
+                self.death_note = ("a step stolen by %s" % self._name(other)) if cause == S.LADDER_STOLEN else "a step lost"
+                audio.play("demoted", 0.7)
+        elif climbed and step == steps - 1:
+            hud.push_kill("%s  reached the FINAL WEAPON" % self._name(pid), R.HUD_CRIMSON)
+            audio.play("final_weapon", 0.35)
+
     def _name(self, pid: int) -> str:
         entry = self.client.roster.get(pid)
         return entry.name if entry is not None else ("PLAYER %d" % pid if pid != S.NO_PLAYER else "THE ARENA")
@@ -684,6 +719,12 @@ class NexusGame:
                 rig.recoil_current[:] = 0.0
                 rig.trauma = 0.0
                 audio.play("respawn", 0.5)
+                self.death_note = ""
+                if client.mode == C.MODE_ESC and client.predictor is not None:
+                    ws = client.predictor.store.weapons
+                    gun = int(ws.weapon[0, int(ws.slot[0])])
+                    self._show_banner("WEAPON %d / %d" % (W.ESCALATION_STEP_OF.get(gun, 0) + 1, W.ESCALATION_STEPS),
+                                      W.WEAPON_NAMES[gun], R.HUD_WHITE, 1.4)
         elif kind == S.EV_SHOT:
             _, shooter, weapon, origin, end = event
             origin = np.asarray(origin) - np.array([0.0, 0.12, 0.0])
@@ -749,13 +790,14 @@ class NexusGame:
                 if slot in expired.tolist():
                     self.grenades.active[slot] = False
                     break
+        elif kind == S.EV_LADDER:
+            self._on_ladder(event)
         elif kind == S.EV_REWARD:
             _, credits, xp, reason = event
             granted, levels = self.pm.apply_reward(credits, xp)
             hud.push_reward("+%s  %s" % (SS.format_number(granted), S.REWARD_NAMES[reason % len(S.REWARD_NAMES)]))
             if levels:
-                self.banner = "LEVEL %d" % self.pm.profile.level
-                self.banner_ttl = 3.0
+                self._show_banner("LEVEL %d" % self.pm.profile.level, "level up bonus credited", R.HUD_GOLD, 3.0)
                 audio.play("level_up", 0.8)
         elif kind == S.EV_MATCH:
             _, phase, winner, _map_index, mode = event
@@ -773,6 +815,10 @@ class NexusGame:
                 self.pm.save()
             else:
                 self.result = ""
+                self.death_note = ""
+                if mode == C.MODE_ESC:
+                    self._show_banner(C.MODE_NAMES[mode], "climb %d guns  -  first up: %s" % (
+                        W.ESCALATION_STEPS, W.WEAPON_NAMES[W.escalation_weapon(0)]), R.HUD_GOLD, 3.0)
                 self.streak = 0
 
     # ================================================================== #
@@ -796,8 +842,15 @@ class NexusGame:
         hud.set_equipment(EQ.EQUIP_NAMES[int(store.equip[0, 0])], 1.0 - min(max(lethal_left, 0.0), 1.0),
                           EQ.EQUIP_NAMES[int(store.equip[0, 1])], 1.0 - min(max(tactical_left, 0.0), 1.0))
         own = client.roster.get(client.pid)
-        hud.set_match(client.mode, client.scores, client.time_left, client.team, own.kills if own is not None else 0,
-                      client.score_limit)
+        if client.mode == C.MODE_ESC:
+            leader = max(client.roster.values(), key=lambda e: (e.score, e.kills), default=None)
+            detail = ("LEADER  %s  ON WEAPON %d" % (leader.name, min(leader.score + 1, client.score_limit))
+                      if leader is not None and leader.score > 0 else "a kill with the last gun wins")
+            hud.set_match(client.mode, client.scores, client.time_left, client.team, own.kills if own is not None else 0,
+                          client.score_limit, W.ESCALATION_STEP_OF.get(weapon, 0), detail)
+        else:
+            hud.set_match(client.mode, client.scores, client.time_left, client.team, own.kills if own is not None else 0,
+                          client.score_limit)
         ended = client.phase == C.PHASE_ENDED
         show_board = ended or bool(held_keys["tab"])
         if show_board:
@@ -806,18 +859,21 @@ class NexusGame:
             for entry in entries:
                 tag = "* " if entry.pid == client.pid else "  "
                 side = ("%s  " % C.TEAM_NAMES[entry.team % 2]) if client.mode == C.MODE_TDM and entry.team < 2 else ""
+                score = min(entry.score + 1, client.score_limit) if client.mode == C.MODE_ESC else entry.score
                 rows.append(("%s%s%s" % (side, entry.name, "  (bot)" if entry.bot else ""), entry.kills, entry.deaths,
-                             entry.score, entry.ping, tag))
-            hud.set_scoreboard(True, rows, "%s  -  %s" % (C.MODE_NAMES[client.mode % len(C.MODE_NAMES)], client.loaded.data.name))
+                             score, entry.ping, tag))
+            hud.set_scoreboard(True, rows, "%s  -  %s" % (C.MODE_NAMES[client.mode % len(C.MODE_NAMES)], client.loaded.data.name),
+                               "WEAPON" if client.mode == C.MODE_ESC else "SCORE")
         else:
             hud.set_scoreboard(False)
         self.banner_ttl = max(self.banner_ttl - dt, 0.0)
         if ended and self.result:
             hud.set_center(self.result, self.result_sub, R.HUD_GOLD if self.result == "VICTORY" else R.HUD_WHITE)
         elif self.dead:
-            hud.set_center("ELIMINATED", ("by %s  -  respawning" % self.killer) if self.killer else "respawning", R.HUD_CRIMSON)
+            parts = (["by %s" % self.killer] if self.killer else []) + ([self.death_note] if self.death_note else [])
+            hud.set_center("ELIMINATED", "  -  ".join(parts + ["respawning"]), R.HUD_CRIMSON)
         elif self.banner_ttl > 0.0:
-            hud.set_center(self.banner, "level up bonus credited", R.HUD_GOLD)
+            hud.set_center(self.banner, self.banner_sub, self.banner_rgb)
         else:
             hud.set_center("")
         if self.hint_timer > 0.0:
