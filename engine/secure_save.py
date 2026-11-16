@@ -42,6 +42,7 @@ import hmac
 import json
 import math
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -213,7 +214,7 @@ DEFAULT_SETTINGS = {
     "sensitivity": 1.0, "fov": C.BASE_FOV, "volume": C.AUDIO_MASTER_DEFAULT, "invert_y": False, "show_fps": True,
     "bot_count": 7, "bot_difficulty": 1, "map": "datacore", "mode": C.MODE_TDM,
     "quality": C.QUALITY_DEFAULT, "dynamic_resolution": C.DYNAMIC_RESOLUTION_DEFAULT,
-    "vsync": C.VSYNC_DEFAULT, "fps_limit": C.FPS_LIMIT_DEFAULT,
+    "vsync": C.VSYNC_DEFAULT, "fps_limit": C.FPS_LIMIT_DEFAULT, "upgrades": True,
 }
 STAT_KEYS = ("kills", "deaths", "headshots", "shots", "hits", "damage", "matches", "wins",
              "best_streak", "grenade_kills", "playtime", "credits_from_sponsors", "credits_from_combat",
@@ -267,25 +268,25 @@ class Profile:
         p = cls()
         p.uid = str(raw.get("uid", p.uid))[:64]
         p.name = sanitize_name(raw.get("name", p.name))
-        p.created_at = float(raw.get("created_at", p.created_at))
-        p.saved_at = float(raw.get("saved_at", p.saved_at))
-        p.credits = max(float(raw.get("credits", 0.0)), 0.0)
-        p.lifetime_credits = max(float(raw.get("lifetime_credits", 0.0)), p.credits)
-        p.level = int(np.clip(int(raw.get("level", 1)), 1, MAX_LEVEL))
-        p.xp = max(float(raw.get("xp", 0.0)), 0.0)
-        p.prestige = int(np.clip(int(raw.get("prestige", 0)), 0, MAX_PRESTIGE))
+        p.created_at = _finite(raw.get("created_at", p.created_at), p.created_at, 0.0, 1.0e11)
+        p.saved_at = _finite(raw.get("saved_at", p.saved_at), p.saved_at, 0.0, 1.0e11)
+        p.credits = _finite(raw.get("credits", 0.0))
+        p.lifetime_credits = max(_finite(raw.get("lifetime_credits", 0.0)), p.credits)
+        p.level = int(_finite(raw.get("level", 1), 1, 1, MAX_LEVEL))
+        p.xp = _finite(raw.get("xp", 0.0))
+        p.prestige = int(_finite(raw.get("prestige", 0), 0, 0, MAX_PRESTIGE))
         stored = raw.get("weapons", {})
         for index, key in enumerate(W.WEAPON_KEYS):
             entry = stored.get(key, {}) if isinstance(stored, dict) else {}
-            levels = list(entry.get("levels", [0] * W.UPGRADE_COUNT))[: W.UPGRADE_COUNT]
+            levels = [_finite(v, 0.0, 0.0, 1.0e6) for v in list(entry.get("levels", []) or [])[: W.UPGRADE_COUNT]]
             levels += [0] * (W.UPGRADE_COUNT - len(levels))
             free = bool(W.WEAPONS["unlock_cost"][index] <= 0.0)
             p.weapons[key] = {"unlocked": bool(entry.get("unlocked", False)) or free,
                               "levels": [int(v) for v in W.clamp_levels(levels)]}
-        operator = list(raw.get("operator", []))[: W.OPERATOR_COUNT]
+        operator = [_finite(v, 0.0, 0.0, 1.0e6) for v in list(raw.get("operator", []) or [])[: W.OPERATOR_COUNT]]
         operator += [0] * (W.OPERATOR_COUNT - len(operator))
         p.operator = [int(v) for v in W.clamp_operator(operator)]
-        sponsors = list(raw.get("sponsors", []))[:SPONSOR_COUNT]
+        sponsors = [_finite(v, 0.0, 0.0, 1.0e6) for v in list(raw.get("sponsors", []) or [])[:SPONSOR_COUNT]]
         sponsors += [0] * (SPONSOR_COUNT - len(sponsors))
         p.sponsors = [int(np.clip(int(v), 0, SPONSOR_MAX_LEVEL)) for v in sponsors]
         loadout = [key for key in list(raw.get("loadout", []))[: W.LOADOUT_SLOTS]
@@ -305,12 +306,17 @@ class Profile:
                 p.equipment[slot] = key
         stats = raw.get("stats", {})
         for key in STAT_KEYS:
-            p.stats[key] = max(float(stats.get(key, 0.0)), 0.0) if isinstance(stats, dict) else 0.0
+            p.stats[key] = _finite(stats.get(key, 0.0)) if isinstance(stats, dict) else 0.0
         settings = raw.get("settings", {})
         if isinstance(settings, dict):
             for key, default in DEFAULT_SETTINGS.items():
                 value = settings.get(key, default)
-                p.settings[key] = type(default)(value) if not isinstance(default, str) else str(value)
+                if isinstance(default, bool):
+                    p.settings[key] = bool(value) if isinstance(value, (bool, int)) else default
+                elif isinstance(default, (int, float)):
+                    p.settings[key] = type(default)(_finite(value, default, -1.0e9, 1.0e9))
+                else:
+                    p.settings[key] = str(value)
         p.settings["sensitivity"] = float(np.clip(p.settings["sensitivity"], 0.05, 10.0))
         p.settings["fov"] = float(np.clip(p.settings["fov"], 60.0, 120.0))
         p.settings["volume"] = float(np.clip(p.settings["volume"], 0.0, 1.0))
@@ -319,11 +325,12 @@ class Profile:
         p.settings["mode"] = int(np.clip(p.settings["mode"], 0, len(C.MODE_NAMES) - 1))
         p.settings["quality"] = int(np.clip(p.settings["quality"], 0, len(C.GRAPHICS_PRESETS) - 1))
         p.settings["fps_limit"] = int(np.clip(p.settings["fps_limit"], 0, 360))
-        p.integrity_strikes = max(int(raw.get("integrity_strikes", 0)), 0)
+        p.integrity_strikes = int(_finite(raw.get("integrity_strikes", 0), 0, 0, 1.0e6))
         contracts = raw.get("contracts", {})
         if isinstance(contracts, dict):
             daily = [_clean_contract(e, False) for e in list(contracts.get("daily", []) or [])[: C.DAILY_CONTRACTS]]
-            p.contracts = {"day": int(contracts.get("day", -1)), "week": int(contracts.get("week", -1)),
+            p.contracts = {"day": int(_finite(contracts.get("day", -1), -1, -1, 1.0e7)),
+                           "week": int(_finite(contracts.get("week", -1), -1, -1, 1.0e7)),
                            "daily": [e for e in daily if e is not None],
                            "weekly": _clean_contract(contracts.get("weekly"), True)}
         return p
@@ -334,6 +341,15 @@ class Profile:
 # =========================================================================== #
 CONTRACT_ROWS = {row[0]: dict(zip(C.CONTRACT_COLUMNS, row)) for row in C.CONTRACT_TABLE}
 CONTRACT_KEYS = tuple(CONTRACT_ROWS)
+
+
+def _finite(value, default: float = 0.0, low: float = 0.0, high: float = 1.0e18) -> float:
+    """A float from untrusted data: NaN, infinity and garbage become ``default``, the rest is clamped."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return float(default)
+    return min(max(number, low), high) if math.isfinite(number) else float(default)
 
 
 def contract_day(now: float) -> int:
@@ -373,7 +389,7 @@ def _clean_contract(entry, weekly: bool):
     if not isinstance(entry, dict) or entry.get("key") not in CONTRACT_ROWS:
         return None
     target = contract_target(entry["key"], weekly)
-    progress = float(np.clip(float(entry.get("progress", 0.0)), 0.0, target))
+    progress = _finite(entry.get("progress", 0.0), 0.0, 0.0, target)
     return {"key": entry["key"], "progress": progress, "done": bool(entry.get("done", False)) or progress >= target}
 
 
@@ -427,7 +443,10 @@ def decode_save(text: str) -> Profile:
         raise SaveTamperError("save payload is not valid JSON") from error
     if not isinstance(raw, dict):
         raise SaveTamperError("save payload has the wrong shape")
-    return Profile.from_dict(raw)
+    try:
+        return Profile.from_dict(raw)
+    except (TypeError, ValueError, KeyError, AttributeError, OverflowError) as error:
+        raise SaveTamperError("save payload has malformed fields: %s" % error) from error
 
 
 # =========================================================================== #
@@ -448,6 +467,8 @@ class ProfileManager:
         self.dirty = False
         self.session_started = time.time()
         self.clock = time.time                    # replaceable in tests (contract rotation)
+        self.save_lock = threading.Lock()         # one save at a time (game thread and sponsor thread)
+        self.read_only = False                    # set when the save exists but cannot be read
         self.notices: list = []                   # (title, text, credits) for finished contracts
 
     # ---- persistence -------------------------------------------------------------
@@ -460,22 +481,34 @@ class ProfileManager:
             self.directory.mkdir(parents=True, exist_ok=True)
             status = "new"
             profile = None
+            unreadable = False
             if self.path.exists():
-                try:
-                    profile = decode_save(self.path.read_text(encoding="utf-8"))
-                    status = "ok"
-                except (SaveTamperError, OSError):
-                    profile = None
-                    status = "tampered_reset"
-                    self._quarantine(self.path)
-            if profile is None and status != "new" and self.backup_path.exists():
-                try:
-                    profile = decode_save(self.backup_path.read_text(encoding="utf-8"))
-                    profile.integrity_strikes += 1
-                    status = "restored_backup"
-                except (SaveTamperError, OSError):
-                    profile = None
-                    self._quarantine(self.backup_path)
+                text = self._read(self.path)
+                if text is None:
+                    unreadable = True                  # an I/O error is not tampering: never quarantine for it
+                else:
+                    try:
+                        profile = decode_save(text)
+                        status = "ok"
+                    except SaveTamperError:
+                        status = "tampered_reset"
+                        self._quarantine(self.path)
+            if profile is None and not unreadable and self.backup_path.exists():   # also when the main file is gone
+                text = self._read(self.backup_path)
+                if text is None:
+                    unreadable = True
+                else:
+                    try:
+                        profile = decode_save(text)
+                        if status == "tampered_reset":
+                            profile.integrity_strikes += 1
+                        status = "restored_backup"
+                    except SaveTamperError:
+                        profile = None
+                        self._quarantine(self.backup_path)
+            if unreadable and profile is None:
+                status = "io_error"                    # keep the files, play on without saving over them
+                self.read_only = True
             if profile is None:
                 profile = Profile()
                 if status == "tampered_reset":
@@ -504,27 +537,48 @@ class ProfileManager:
             pass
 
     def save(self) -> bool:
-        """Atomically write the signed save (temp file + rename) and rotate the backup."""
-        with self.lock:
-            now = time.time()
-            self.profile.stats["playtime"] += max(now - self.session_started, 0.0)
-            self.session_started = now
-            self.profile.saved_at = now
-            text = encode_save(self.profile)
-            self.dirty = False
-        try:
-            self.directory.mkdir(parents=True, exist_ok=True)
-            temp = self.path.with_name(self.path.name + ".tmp")
-            with open(temp, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(text)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if self.path.exists():
-                os.replace(self.path, self.backup_path)
-            os.replace(temp, self.path)
-            return True
-        except OSError:
-            return False
+        """
+        Write the signed save atomically.  Saves are serialised (the game
+        thread and the sponsor thread both save); the previous file is
+        *copied* to the backup first, so the main file is never missing,
+        not even if the process dies in the middle.
+        """
+        with self.save_lock:
+            if self.read_only:
+                return False
+            with self.lock:
+                now = time.time()
+                self.profile.stats["playtime"] += max(now - self.session_started, 0.0)
+                self.session_started = now
+                self.profile.saved_at = now
+                text = encode_save(self.profile)
+                self.dirty = False
+            try:
+                self.directory.mkdir(parents=True, exist_ok=True)
+                temp = self.path.with_name(self.path.name + ".tmp")
+                with open(temp, "w", encoding="utf-8", newline="\n") as handle:
+                    handle.write(text)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if self.path.exists():
+                    spare = self.backup_path.with_name(self.backup_path.name + ".tmp")
+                    shutil.copyfile(self.path, spare)
+                    os.replace(spare, self.backup_path)
+                os.replace(temp, self.path)
+                return True
+            except OSError:
+                return False
+
+    @staticmethod
+    def _read(path: Path, attempts: int = 3):
+        """The file's text, or None when it cannot be read (retried: the error may be transient)."""
+        for attempt in range(attempts):
+            try:
+                return path.read_text(encoding="utf-8")
+            except OSError:
+                if attempt + 1 < attempts:
+                    time.sleep(0.05)
+        return None
 
     # ---- low level credit / experience -----------------------------------------------
     def _credit(self, amount: float, stat_key: str | None = None) -> None:

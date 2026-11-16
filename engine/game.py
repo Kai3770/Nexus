@@ -193,7 +193,9 @@ class NexusGame:
         if status == "tampered_reset":
             self.menus.notify("PROFILE INTEGRITY CHECK FAILED - the save file was modified and has been reset", 12.0)
         elif status == "restored_backup":
-            self.menus.notify("Save file failed verification - the previous backup was restored", 10.0)
+            self.menus.notify("The save file was missing or failed verification - the previous backup was restored", 10.0)
+        elif status == "io_error":
+            self.menus.notify("THE SAVE FILE COULD NOT BE READ - this session will not be saved; restart the game", 12.0)
         elif profile_manager.offline_credits > 0.0:
             self.menus.notify("While you were away (%s) your sponsors paid %s" % (
                 SS.format_duration(profile_manager.offline_seconds), SS.format_number(profile_manager.offline_credits)), 10.0)
@@ -245,12 +247,19 @@ class NexusGame:
         return "%s  -  %s  -  ping %d ms" % (client.loaded.data.name, C.MODE_NAMES[client.mode % len(C.MODE_NAMES)],
                                              round(client.ping_ms))
 
-    def start_match(self, host: bool, map_key: str, mode: int, bots: int, difficulty: int) -> None:
-        """Start a listen server in this process (advertised on the LAN when hosting) and join it."""
+    def start_match(self, host: bool, map_key: str, mode: int, bots: int, difficulty: int, upgrades=None) -> None:
+        """
+        Start a listen server in this process (advertised on the LAN when hosting) and join it.
+        ``upgrades`` False ignores everybody's upgrade levels: the server cannot verify what a LAN
+        player bought, so a host who wants a level playing field turns them off (default: setting).
+        """
         self._shutdown_session()
+        if upgrades is None:
+            upgrades = bool(self.pm.profile.settings.get("upgrades", True))
         config = N.ServerConfig(name="%s ARENA" % self.pm.profile.name, map_key=map_key, mode=mode,
                                 bot_fill=bots + 1, bot_difficulty=difficulty, beacon=host,
-                                max_players=C.MAX_PLAYERS if host else max(bots + 1, 2), rotate_maps=host)
+                                max_players=C.MAX_PLAYERS if host else max(bots + 1, 2), rotate_maps=host,
+                                upgrades_enabled=bool(upgrades))
         try:
             self.server = N.host_local_game(config)
         except OSError as error:

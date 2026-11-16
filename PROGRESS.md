@@ -23,7 +23,8 @@ gespeicherte Fortschritt; `README.md` beschreibt das Spiel selbst.
 | Match-Report und Medaillen | 12 Medaillen mit Popups (+50 XP), Report mit MVP, Bilanz, Trefferquote, Credits/XP und Medaillen neben dem Scoreboard |
 | Aufträge | 3 tägliche und 1 wöchentlicher Auftrag aus 10 Arten nach UTC-Datum, Fortschritt über die Profil-Statistik, Auszahlung 2.500 / 15.000 Credits, im signierten Spielstand; Menü CONTRACTS |
 | Netcode | Owner-State überträgt das komplette Loadout (Waffen + Upgrade-Stufen) und den Streak-Zustand, Snapshots den Schild und den Zonenzustand; Protokoll-Version 14 |
-| Tests | 158 bestanden (`python -m pytest tests -q` und `python tests/run_all.py`), davon 2 gerenderte Läufe unter xvfb |
+| Code-Review | Rollenbasierte Prüfung (Sicherheit/Persistenz durch einen eigenen Prüfer, dazu Fuzzing aller Paketpfade, Dauertest aller Modi mit strenger Numerik, Wiederholung zeitkritischer Tests); behoben: Server-Absturz durch NaN-Blickwinkel, Tick-Manipulation (Dauerfeuer/Abklingzeiten), unbegrenzte FIRE-Einträge und Inbox, Übernahme laufender Sitzungen, Markup in Namen, Zeitlimit 0, Wettlauf beim Speichern, Backup bei fehlender Datei, Lesefehler als Manipulation, NaN im Spielstand, UPLINK-Zonen ohne exakten Nullpunkt; Host-Schalter UPGRADES |
+| Tests | 170 bestanden (`python -m pytest tests -q` und `python tests/run_all.py`), davon 2 gerenderte Läufe unter xvfb |
 
 ## Messwerte (Container ohne GPU, Mesa llvmpipe, 1280x720, 8 Spieler, Listen-Server im selben Prozess)
 

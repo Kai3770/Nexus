@@ -39,6 +39,10 @@ beacon to `255.255.255.255:28015` once per second. Everybody else opens **JOIN L
 clicks the match. Gameplay traffic uses UDP 28016 (the next free port if that one is taken), so
 allow UDP 28015 and 28016 through the local firewall.
 
+Trust on a LAN: there is no account server, so the upgrade levels a player brings come from their own
+local profile and the server cannot verify them. A host who wants a level playing field sets
+**UPGRADES OFF** in MATCH SETUP (or starts with `--no-upgrades`; `dedicated_server.py --no-upgrades`).
+
 Modes: Team Deathmatch (VANTA vs HELIX), Free For All, ESCALATION and UPLINK on five arenas (DATACORE,
 SKYBRIDGE, CRUCIBLE, TERMINAL, ATRIUM). The server tops the match up with bots (three difficulty levels).
 
@@ -284,6 +288,12 @@ signed save (`CONTRACT_TABLE` in `engine/config.py`).
   server keeps the last 30 ticks (500 ms) of every player's root transform, rewinds all hitboxes
   to that timestamp, ray casts, applies the zone multiplier and restores the present.
 * **Snapshots** are delta compressed against the last one the client acknowledged.
+* **Hardening.** Every inbound packet path was fuzzed in the code review. The server replaces non-finite
+  view angles, lets a client's command clock run no faster than real time (a two second burst
+  covers packet loss, so jumping ticks cannot skip fire rates or cooldowns), keeps at most 48 FIRE
+  records per client, bounds its inbox and the packets it handles per tick, rate-limits connect
+  attempts per address, never lets an unauthenticated connect request replace a live session,
+  strips `<` / `>` (Ursina markup) from every name it receives and survives a failing tick.
 
 ## Save file integrity
 
@@ -292,6 +302,12 @@ final line `#SHA256:<hex>` holding `SHA-256(json + salt)`. A modified file fails
 the previous good save is restored (or the profile is reset) and a strike is recorded. The salt
 and cipher key are constants in `engine/secure_save.py`: that stops hand-editing a save file, it
 does not stop someone who reads the source and re-signs a file. The same applies to the beacon key.
+
+Saves are serialised (the game and the Corporate Sponsor Thread both save) and the previous file is
+copied to `profile.sav.bak` before the new one replaces it atomically, so the main file never goes
+missing; if it does anyway, the backup is loaded. A file that cannot be *read* (permissions, disk
+errors) is never treated as tampering: it is left alone and that session is not saved over it. Every
+number in a save is checked to be finite and in range.
 
 ## Tests
 
@@ -303,7 +319,7 @@ python -m pytest tests -q
 python tests/run_all.py
 ```
 
-The second command needs no pytest. 158 tests cover the math, the octree against a brute-force
+The second command needs no pytest. 170 tests cover the math, the octree against a brute-force
 reference, movement, weapons and the balance model, the simulation, all arenas and the injector
 (run-time registration, JSON drop-ins, malformed definitions, checksums), navigation on every
 storey, bot-only matches, the save system, wire codecs, rollback, live client / server sessions
@@ -317,7 +333,9 @@ them), the minimap of every arena, the death recap, UPLINK (fair zones on every 
 contesting, neutralising, scoring, bots spreading over the zones, the zone state in snapshots and a live
 session), every medal and the match report, contracts (calendar rotation, payout, the signed save),
 procedural materials, light baking, dynamic resolution,
-camera springs at 10 fps, a client
+camera springs at 10 fps, regression tests for every defect the code review found (hostile packets,
+command clocks running ahead, unbounded queues, session hijacking, markup in names, concurrent and
+unreadable saves, non-finite numbers in saves), a client
 that stalls while baking, and two rendered end-to-end runs
 (under `xvfb-run` when there is no display; skipped if neither exists).
 

@@ -190,15 +190,16 @@ class SetupScreen(Screen):
         self.mode = int(settings["mode"])
         self.bots = int(settings["bot_count"])
         self.difficulty = int(settings["bot_difficulty"])
+        self.upgrades = bool(settings.get("upgrades", True))
         self.panel(0.0, 0.03, 0.9, 0.58)
         self.rows = {}
-        for index, key in enumerate(("ARENA", "MODE", "BOTS", "DIFFICULTY")):
-            y = 0.22 - index * 0.09
+        for index, key in enumerate(("ARENA", "MODE", "BOTS", "DIFFICULTY", "UPGRADES")):
+            y = 0.23 - index * 0.075
             self.label(key, -0.38, y, 1.05, rgb=COL_DIM)
-            self.button("-", 0.02, y, 0.05, 0.055, lambda k=key: self.step(k, -1))
+            self.button("-", 0.02, y, 0.05, 0.05, lambda k=key: self.step(k, -1))
             self.rows[key] = self.label("", 0.21, y, 1.1, (0, 0))
-            self.button("+", 0.40, y, 0.05, 0.055, lambda k=key: self.step(k, 1))
-        self.mode_info = self.label("", 0.0, 0.088, 0.62, (0, 0), COL_DIM)
+            self.button("+", 0.40, y, 0.05, 0.05, lambda k=key: self.step(k, 1))
+        self.mode_info = self.label("", 0.0, 0.118, 0.6, (0, 0), COL_DIM)
         self.info = self.label("", 0.0, -0.135, 0.8, (0, 0), COL_DIM)
         self.kind = self.label("", 0.0, 0.335, 0.9, (0, 0), COL_DIM)
         self.button("START MATCH", 0.0, -0.215, 0.36, 0.065, self.start, COL_GOOD, 1.1)
@@ -211,6 +212,8 @@ class SetupScreen(Screen):
             self.mode = (self.mode + delta) % len(C.MODE_NAMES)
         elif key == "BOTS":
             self.bots = min(max(self.bots + delta, 0), C.MAX_PLAYERS - 1)
+        elif key == "UPGRADES":
+            self.upgrades = not self.upgrades
         else:
             self.difficulty = (self.difficulty + delta) % len(DIFFICULTY_NAMES)
         self.refresh()
@@ -221,15 +224,17 @@ class SetupScreen(Screen):
         self.set_text(self.mode_info, C.MODE_DESCRIPTIONS[self.mode % len(C.MODE_DESCRIPTIONS)])
         self.set_text(self.rows["BOTS"], str(self.bots))
         self.set_text(self.rows["DIFFICULTY"], DIFFICULTY_NAMES[self.difficulty])
+        self.set_text(self.rows["UPGRADES"], "ON" if self.upgrades else "OFF  (level field)")
         self.set_text(self.info, maps.get_map_data(self.map_index).description)
         self.set_text(self.kind, "LAN HOST: colleagues on this network will see the match in their lobby" if self.host
                       else "SOLO: a private server on this machine, bots only")
 
     def start(self) -> None:
         for key, value in (("map", maps.MAP_KEYS[self.map_index]), ("mode", self.mode), ("bot_count", self.bots),
-                           ("bot_difficulty", self.difficulty)):
+                           ("bot_difficulty", self.difficulty), ("upgrades", self.upgrades)):
             self.pm.set_setting(key, value)
-        self.game.start_match(self.host, maps.MAP_KEYS[self.map_index], self.mode, self.bots, self.difficulty)
+        self.game.start_match(self.host, maps.MAP_KEYS[self.map_index], self.mode, self.bots, self.difficulty,
+                              upgrades=self.upgrades)
 
 
 # =========================================================================== #

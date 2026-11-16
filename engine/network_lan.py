@@ -31,11 +31,13 @@ never competes with the discovery listeners bound to 28015.
 from __future__ import annotations
 
 import heapq
+import math
 import random
 import socket
 import struct
 import threading
 import time
+import traceback
 from collections import deque
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -126,14 +128,29 @@ def seq_newer(a: int, b: int) -> bool:
 
 
 # ---- quantisation helpers ---------------------------------------------------
+def _finite(values) -> np.ndarray:
+    return np.nan_to_num(np.asarray(values, dtype=np.float64), nan=0.0, posinf=1.0e6, neginf=-1.0e6)
+
+
 def quantize_position(position) -> tuple:
-    q = np.clip(np.rint(np.asarray(position, dtype=np.float64) * C.POS_QUANT), -32767, 32767).astype(np.int64)
+    q = np.clip(np.rint(_finite(position) * C.POS_QUANT), -32767, 32767).astype(np.int64)
     return int(q[0]), int(q[1]), int(q[2])
 
 
 def quantize_velocity(velocity) -> tuple:
-    q = np.clip(np.rint(np.asarray(velocity, dtype=np.float64) * C.VEL_QUANT), -32767, 32767).astype(np.int64)
+    q = np.clip(np.rint(_finite(velocity) * C.VEL_QUANT), -32767, 32767).astype(np.int64)
     return int(q[0]), int(q[1]), int(q[2])
+
+
+def clean_name(raw, fallback: str = "PLAYER", limit: int = 16) -> str:
+    """
+    Printable text from the network without '<' and '>' (Ursina's Text
+    treats them as markup and an untrusted name could crash every client
+    that draws it), at most ``limit`` characters.
+    """
+    text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray, memoryview)) else str(raw)
+    cleaned = "".join(ch for ch in text if ch.isprintable() and ch not in "<>")[:limit].strip()
+    return cleaned or fallback
 
 
 def _unq(q, scale) -> tuple:
@@ -459,7 +476,7 @@ def decode_beacon(datagram: bytes, address: str) -> ServerInfo | None:
         plain = crypto.unseal(BEACON_KEY, datagram[4:])
         (protocol, port, players, max_players, bots, map_index, mode, rate, uid, map_crc,
          length) = BEACON_STRUCT.unpack_from(plain, 0)
-        name = plain[BEACON_STRUCT.size: BEACON_STRUCT.size + length].decode("utf-8", "replace")
+        name = clean_name(plain[BEACON_STRUCT.size: BEACON_STRUCT.size + length], "NEXUS SERVER", 32)
     except (crypto.AuthenticationError, struct.error):
         return None
     return ServerInfo(address, port, name, players, max_players, bots, map_index, mode, rate, uid, protocol,
@@ -785,7 +802,7 @@ class Connection:
 
     __slots__ = ("addr", "token", "pid", "nonce", "name", "last_recv", "cmds", "newest_cmd", "consumed", "budget",
                  "fire", "ack_shot", "ack_snapshot", "events", "next_event_seq", "transient", "echo_time",
-                 "echo_recv", "ping_ms", "fire_missing", "client_velocity", "starved")
+                 "echo_recv", "ping_ms", "fire_missing", "client_velocity", "starved", "tick_credit", "credit_time")
 
     def __init__(self, addr, token: int, pid: int, nonce: int, name: str, start_tick: int, now: float):
         self.addr = addr
@@ -810,6 +827,8 @@ class Connection:
         self.fire_missing = 0
         self.client_velocity = (0, 0, 0)
         self.starved = 0
+        self.tick_credit = float(C.CMD_TICK_BURST)    # command ticks may not run ahead of real time
+        self.credit_time = now
 
 
 class GameServer:
@@ -831,7 +850,8 @@ class GameServer:
         self.lock = threading.RLock()
         self.conns: dict = {}                 # address -> Connection
         self.by_pid: dict = {}                # player id -> Connection
-        self.inbox: deque = deque()
+        self.inbox: deque = deque(maxlen=C.INBOX_LIMIT)
+        self.connect_times: dict = {}         # address -> time of the last accepted connect attempt
         self.ring: list = [None] * C.SNAPSHOT_RING
         self.uid = random.SystemRandom().getrandbits(32)
         self.running = False
@@ -939,7 +959,12 @@ class GameServer:
                 continue
             if -remaining > 0.25:
                 next_time = now                     # stalled: resynchronise instead of bursting
-            self.tick_once()
+            try:
+                self.tick_once()
+            except Exception:                       # one bad tick must not end the match for everybody
+                self.stats["tick_errors"] = self.stats.get("tick_errors", 0) + 1
+                if self.stats["tick_errors"] <= 3:
+                    traceback.print_exc()
             next_time += C.TICK_DT
 
     # ---- sending -----------------------------------------------------------------------------------
@@ -955,7 +980,7 @@ class GameServer:
     # ---- inbound packets -------------------------------------------------------------------------------
     def _drain_inbox(self) -> None:
         inbox = self.inbox
-        while inbox:
+        for _ in range(min(len(inbox), C.PACKETS_PER_TICK)):    # a flood waits instead of stalling the tick
             data, addr, received = inbox.popleft()
             self.stats["bytes_in"] += len(data)
             try:
@@ -987,10 +1012,17 @@ class GameServer:
         if known is not None and known.nonce == nonce:
             self._send_ack(known)                      # our earlier acknowledgement was lost
             return
+        if known is not None and received - known.last_recv < C.RECONNECT_GRACE:
+            return                                     # an unauthenticated request never replaces a live session
+        if received - self.connect_times.get(addr, -1.0e9) < C.CONNECT_INTERVAL:
+            return
+        self.connect_times[addr] = received
+        if len(self.connect_times) > 1024:
+            self.connect_times = {a: t for a, t in self.connect_times.items() if received - t < 10.0}
         if protocol != C.PROTOCOL_VERSION:
             self._send_raw(make_packet(PKT_CONNECT_DENY, 0, CONNECT_DENY.pack(nonce, DENY_VERSION)), addr)
             return
-        name = data[offset: offset + name_len].decode("utf-8", "replace")
+        name = clean_name(data[offset: offset + name_len])
         offset += name_len
         try:
             weapon_ids, levels, operator, prestige = W.decode_loadout(data[offset: offset + W.LOADOUT_BLOB_SIZE])
@@ -1046,20 +1078,32 @@ class GameServer:
             events.popleft()
         commands, offset = decode_commands(data, offset, n_cmds)
         first = newest - n_cmds + 1
+        conn.tick_credit = min(conn.tick_credit + (received - conn.credit_time) * C.TICK_RATE, C.CMD_TICK_BURST)
+        conn.credit_time = received
         for index, (buttons, yaw, pitch, velocity) in enumerate(commands):
             tick = first + index
-            if tick > conn.newest_cmd:
-                conn.cmds.append((tick, buttons, yaw, pitch))
-                conn.newest_cmd = tick
-                conn.client_velocity = velocity
+            if tick <= conn.newest_cmd:
+                continue
+            advance = tick - conn.newest_cmd
+            if advance > conn.tick_credit:
+                break                                  # ticks faster than real time would skip every cooldown
+            conn.tick_credit -= advance
+            if not (math.isfinite(yaw) and math.isfinite(pitch)):
+                yaw = pitch = 0.0                      # a NaN view angle would poison the whole simulation
+            conn.cmds.append((tick, buttons, yaw, pitch))
+            conn.newest_cmd = tick
+            conn.client_velocity = velocity
         while len(conn.cmds) > C.CMD_QUEUE_LIMIT:
             conn.cmds.popleft()
+        if len(conn.fire) >= C.FIRE_RECORD_LIMIT // 2:
+            conn.fire = {t: record for t, record in conn.fire.items() if t > conn.consumed}
         for _ in range(n_fire):
             seq, tick, view_ms, _slot = FIRE_RECORD.unpack_from(data, offset)
             offset += FIRE_RECORD.size
             if seq_newer(seq, conn.ack_shot):
                 conn.ack_shot = seq
-            if tick > conn.consumed and tick not in conn.fire:
+            if (conn.consumed < tick <= conn.newest_cmd and tick not in conn.fire
+                    and len(conn.fire) < C.FIRE_RECORD_LIMIT):
                 conn.fire[tick] = (seq, view_ms)
 
     def _drop(self, conn: Connection) -> None:
@@ -1617,7 +1661,7 @@ class GameClient:
         self.server = None
         self.token = 0
         self.nonce = random.SystemRandom().getrandbits(32)
-        self.inbox: deque = deque()
+        self.inbox: deque = deque(maxlen=C.INBOX_LIMIT)
         self.running = False
         self.thread = None
         self.conditioner = NetConditioner(fake_lag_ms, fake_jitter_ms, fake_loss, seed)
@@ -1918,7 +1962,7 @@ class GameClient:
         for _ in range(count):
             pid, team, flags, kills, deaths, score, ping, length = ROSTER_ENTRY.unpack_from(data, offset)
             offset += ROSTER_ENTRY.size
-            name = data[offset: offset + length].decode("utf-8", "replace")
+            name = clean_name(data[offset: offset + length], "PLAYER %d" % pid)
             offset += length
             roster[pid] = RosterEntry(pid, team, flags, kills, deaths, score, ping, name)
         self.roster = roster

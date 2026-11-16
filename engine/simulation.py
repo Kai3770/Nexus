@@ -271,8 +271,8 @@ def simulate_commands(store: PlayerStore, world: CollisionWorld, rows, buttons, 
     if n == 0:
         return fired, ability, tactical
     buttons = np.broadcast_to(np.asarray(buttons, dtype=np.uint16), (n,))
-    yaw = np.broadcast_to(np.asarray(yaw, dtype=np.float64), (n,))
-    pitch = np.broadcast_to(np.asarray(pitch, dtype=np.float64), (n,))
+    yaw = np.broadcast_to(np.nan_to_num(np.asarray(yaw, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0), (n,))
+    pitch = np.broadcast_to(np.nan_to_num(np.asarray(pitch, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0), (n,))
     ticks = np.broadcast_to(np.asarray(cmd_tick, dtype=np.int64), (n,))
     store.cmd_tick[rows] = ticks
     alive = store.alive[rows]
@@ -496,7 +496,8 @@ class GameWorld:
             C.MODE_TDM: C.TDM_SCORE_LIMIT, C.MODE_UPLINK: C.UPLINK_SCORE_LIMIT}.get(self.mode, C.FFA_SCORE_LIMIT)
         if self.mode == C.MODE_ESC:
             self.score_limit = W.ESCALATION_STEPS            # completing the ladder is the only way to win
-        self.time_limit = float(time_limit)
+        limit = float(time_limit) if time_limit is not None else C.MATCH_TIME_LIMIT
+        self.time_limit = max(limit, C.MIN_TIME_LIMIT) if limit > 0.0 else C.MATCH_TIME_LIMIT
         self.rng = np.random.default_rng(seed)
         self.store = PlayerStore(capacity)
         self.ladder = np.zeros(self.store.capacity, dtype=np.int64)     # ESCALATION step per player

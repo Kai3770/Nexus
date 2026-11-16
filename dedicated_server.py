@@ -72,6 +72,10 @@ def main(argv=None) -> int:
     from engine import config as C
     from engine import network_lan as N
 
+    if args.time_limit < C.MIN_TIME_LIMIT:
+        print("--time-limit must be at least %d seconds" % C.MIN_TIME_LIMIT, file=sys.stderr)
+        return 2
+
     config = N.ServerConfig(name=args.name, port=args.port or C.GAME_PORT, map_key=args.map, mode=MODES[args.mode],
                             max_players=min(max(args.max_players, 1), C.MAX_PLAYERS),
                             bot_fill=min(max(args.bots, 0), C.MAX_PLAYERS), bot_difficulty=args.difficulty,

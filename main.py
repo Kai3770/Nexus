@@ -56,6 +56,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--no-dynamic-resolution", action="store_true", help="keep the 3D render scale fixed")
     parser.add_argument("--save-dir", help="directory of the profile save (default: ./saves)")
     parser.add_argument("--autoplay", action="store_true", help="let the built-in pilot play (demo / testing)")
+    parser.add_argument("--no-upgrades", action="store_true",
+                        help="hosting or solo: ignore everybody's upgrade levels (a level playing field)")
     parser.add_argument("--frames", type=int, default=0, help="quit after this many frames (0 = never)")
     parser.add_argument("--screenshots", metavar="DIR", help="save screenshots into DIR")
     parser.add_argument("--shot-every", type=int, default=120)
@@ -128,7 +130,8 @@ def main(argv=None) -> int:
     driver.input = game.input
 
     if args.solo or args.host:
-        game.start_match(bool(args.host), args.host or args.solo, MODES[args.mode], args.bots, args.difficulty)
+        game.start_match(bool(args.host), args.host or args.solo, MODES[args.mode], args.bots, args.difficulty,
+                         upgrades=not args.no_upgrades)
     elif args.connect:
         host, _, port = args.connect.partition(":")
         game.join_match(host, int(port) if port else C.GAME_PORT)
