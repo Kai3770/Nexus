@@ -1,6 +1,6 @@
 # NEXUS-3D-EXTREME – Roadmap
 
-Stand: 15.11.2026, nach Sprint 3. Geplant aus einer Code-Analyse (Knowledge-Graph mit graphify:
+Stand: 17.11.2026, nach Sprint 3 und dem Code-Review. Geplant aus einer Code-Analyse (Knowledge-Graph mit graphify:
 1472 Knoten, 3349 Kanten, 81 Module-Gruppen, keine Import-Zyklen) und Bot-Messungen.
 
 ## Bestandsaufnahme
@@ -57,6 +57,15 @@ nie auseinanderlaufen. Balance-Prüfungen (`validate_balance`, `validate_equipme
 | Match-Report und Medaillen | 12 Medaillen mit Popups, Report mit MVP und persönlicher Bilanz neben dem Scoreboard |
 | Aufträge | 3 tägliche und 1 wöchentlicher Auftrag nach UTC-Datum, Auszahlung sofort, im signierten Spielstand |
 | Tests | 18 neue Tests (158 insgesamt), gerenderte Szenen für Erobern, Medaillen, Report und Menüs geprüft |
+
+## Code-Review nach Sprint 3 – erledigt
+
+| Thema | Ergebnis |
+| --- | --- |
+| Sicherheit und Speichern | Netz-Eingaben gehärtet (NaN, Tick-Sprünge, Fluten, Sitzungsübernahme, Markup), Spielstand robust gegen Wettläufe, Lesefehler und NaN |
+| Spielregeln | 14 Funde behoben (u. a. Nachrücker erbt Granaten, Einfrieren ohne Spawns, Punkte in der Pause, Gleichstände, ESCALATION-Kit, Spawnschutz, Lanzenziel) |
+| Client | 14 Funde behoben (Endstand für MVP/Report, Trefferquote, HUD über Menüs, 4:3, Pause zwischen Matches, Eingabe nach RESUME) |
+| Tests | 185 insgesamt; jede Regression schlägt auf dem alten Code fehl; Szenen bei 16:9 und 4:3 gerendert und geprüft |
 
 ## Sprint 4 – Technik und Hosting
 

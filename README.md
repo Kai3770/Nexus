@@ -67,10 +67,11 @@ and split over the zones in mirror image for the two squads. Tunables are the `U
 
 A weapon ladder. Everybody starts with the same stock gun in both slots (swapping does nothing),
 and every kill with a gun hands the killer the next one, with a full magazine. A kill with the last
-gun wins the match; at the time limit the player furthest up wins (kills break ties). The lethal
-slot is always the **RAZOR HATCHET**: a hatchet kill also climbs, and drops the victim one step
-("stole a step"). Killing yourself (falling, your own blast) costs a step. Nobody drops below the
-first gun, and your own loadout and upgrades stay out of it, so the mode is fair for new profiles.
+gun wins the match; at the time limit the player furthest up wins (kills break ties, a full tie is a
+draw). The lethal slot is always the **RAZOR HATCHET**: a hatchet kill also climbs, and drops the victim
+one step ("stole a step") -- but never onto the win: on the last gun only a gun kill finishes the ladder.
+Killing yourself (falling, your own blast) costs a step. Nobody drops below the first gun, and your own
+loadout and upgrades (weapon and operator) stay out of it, so the mode is fair for new profiles.
 
 The ladder runs through all 29 weapons: automatics first, then LMGs and shotguns, marksman rifles
 and snipers, and the pistols at the top. It is data, `ESCALATION_LADDER` in `engine/config.py`;
@@ -105,6 +106,9 @@ definition)` at run time. Nothing else is needed: waypoints for the bots are sam
 automatically on every storey and over ramps, and lighting is baked on first load. Both sides of
 a connection must have the same arena: beacon, handshake and map rotation carry a CRC of the
 definition, and a client without it is refused with a clear message instead of desynchronising.
+A JSON arena needs at least one spawn point; names and descriptions lose `<` / `>` (UI markup), and a
+broken file is listed in `maps.REGISTRY_ERRORS` and skipped instead of stopping the game. An arena
+without spawns for one squad spawns that squad on the others' points.
 
 ## Graphics
 
@@ -120,6 +124,9 @@ definition, and a client without it is refused with a clear message instead of d
   and stars, and a ring of distant towers as real geometry.
 * **Batching.** One static buffer and one draw call for the arena; one buffer per effect pool,
   for all players, and for all HUD vectors.
+* **Screens.** HUD and menus are laid out for 16:9 and fit 4:3 and 5:4 as well: the menus scale as a
+  whole, the kill feed moves under the header and the control hint wraps. The window keeps the size
+  it opened with (`--size 1024x768`, default 1600x900).
 * **Frame pacing.** Vsync is off by default and a frame limiter (144 fps) is used instead,
   because double-buffered vsync halves 59 fps to 30. The 3D scene renders into an off-screen
   buffer whose resolution follows the measured frame time (50 to 100 %, target 60 fps); if the
@@ -148,7 +155,8 @@ respawn, like a class change). Bots carry random equipment and use it.
 
 `equipment.validate_equipment()` checks the balance rules, and the test-suite plays every item in the real
 simulation: no blast kills a full-health player more than 1 m away (none at all through full Blast Plating),
-a player wearing a cling charge always dies, fire needs more than two seconds to kill, the hatchet (direct
+a player wearing a cling charge dies (only full Blast Plating plus an AEGIS SHIELD leaves a sliver of
+health), fire needs more than two seconds to kill, the hatchet (direct
 hits only) recharges fastest, and a stim heals too slowly to win a gunfight with. The table is
 `EQUIPMENT_TABLE` in `engine/config.py`.
 
@@ -156,7 +164,10 @@ hits only) recharges fastest, and a stim heals too slowly to win a gunfight with
 
 Kills in a row within one life earn rewards (not in ESCALATION). A reward is earned once per life and
 then waits, also through deaths, until `X` uses it (the smallest ready one first) or the match ends.
-Kills made by a reward never extend the streak.
+Kills made by a reward never extend the streak, and neither do kills your grenade or fire makes after
+you died: they count, but the next life starts its streak from zero. Throwing equipment or using a
+reward ends spawn protection, like firing does. The lance lands under the feet of the enemy your
+crosshair is on, or on the surface behind the crosshair.
 
 | Reward | Kills | What it does |
 | --- | --- | --- |
@@ -237,12 +248,17 @@ A host can run a level playing field with `dedicated_server.py --no-upgrades`.
 
 ### Medals, match report and contracts
 
-Twelve medals are earned during a match and pop up in the reward feed (+50 XP each): FIRST STRIKE, DOUBLE
+Twelve medals are earned during a match and pop up in the reward feed (+50 XP each): FIRST STRIKE (the
+server marks the match's first elimination, so it is right for players who joined late too), DOUBLE
 DOWN and TRIPLE THREAT (eliminations within 4 s of each other), IRON WILL and OVERDRIVE (5 and 10 without
-dying), PAYBACK, HEADHUNTER (5 headshots), DEMOLITION (3 equipment eliminations), STARFALL (an ORBITAL LANCE
+dying), PAYBACK, HEADHUNTER (5 headshots), DEMOLITION (3 equipment eliminations: grenades, charges, the
+hatchet and fire), STARFALL (an ORBITAL LANCE
 elimination), UPLINKER (3 captures), SHARPSHOOTER (half of at least 30 shots hit) and MVP. When the match
-ends a **match report** appears next to the scoreboard: the MVP, eliminations, deaths, K/D, accuracy,
+ends a **match report** appears next to the scoreboard, titled with the result: the MVP, eliminations,
+deaths, K/D, accuracy (bullets only -- blasts, fire, hatchets and the lance add damage but are no hits),
 headshots, best streak, damage, captures, the credits and XP earned and the medals (`engine/report.py`).
+The server sends the scores the moment a match ends, so MVP and report use the final numbers; the
+countdown to the next match, news such as a level up and the rewards show under the boards.
 
 **Contracts** (main menu): three daily contracts and one weekly contract, picked from ten kinds by the UTC
 date so everybody gets the same ones on the same day -- eliminations, headshots, wins, matches, damage,
@@ -294,6 +310,11 @@ signed save (`CONTRACT_TABLE` in `engine/config.py`).
   records per client, bounds its inbox and the packets it handles per tick, rate-limits connect
   attempts per address, never lets an unauthenticated connect request replace a live session,
   strips `<` / `>` (Ursina markup) from every name it receives and survives a failing tick.
+* **Fair leftovers.** A player who leaves takes their grenades in flight, fire pools, pending lances
+  and their claim on a fall with them, so a newcomer in the same slot is never credited with them.
+  Between matches nobody scores: a player who falls off is put back on a spawn and blasts push nobody.
+  A fall is credited to the last enemy who hurt you within five seconds, never refreshed by your own
+  blast.
 
 ## Save file integrity
 
@@ -319,7 +340,7 @@ python -m pytest tests -q
 python tests/run_all.py
 ```
 
-The second command needs no pytest. 170 tests cover the math, the octree against a brute-force
+The second command needs no pytest. 185 tests cover the math, the octree against a brute-force
 reference, movement, weapons and the balance model, the simulation, all arenas and the injector
 (run-time registration, JSON drop-ins, malformed definitions, checksums), navigation on every
 storey, bot-only matches, the save system, wire codecs, rollback, live client / server sessions
@@ -335,7 +356,10 @@ session), every medal and the match report, contracts (calendar rotation, payout
 procedural materials, light baking, dynamic resolution,
 camera springs at 10 fps, regression tests for every defect the code review found (hostile packets,
 command clocks running ahead, unbounded queues, session hijacking, markup in names, concurrent and
-unreadable saves, non-finite numbers in saves), a client
+unreadable saves, non-finite numbers in saves, players who leave with grenades in flight, arenas
+without spawns for a squad, falls and blasts between matches, fall credit, posthumous kills, ties,
+the stock ESCALATION kit and its last step, spawn protection, hits that are no bullets, FIRST STRIKE,
+the roster at the end of a match, markup and broken files in drop-in arenas), a client
 that stalls while baking, and two rendered end-to-end runs
 (under `xvfb-run` when there is no display; skipped if neither exists).
 

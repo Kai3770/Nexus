@@ -2688,7 +2688,7 @@ class HUD:
         0 hides one) and up to four marked lances ``(position, progress)``.
         """
         self.q_rgba[Q_RADAR_SELF: Q_RADAR_STRIKES + RADAR_STRIKES, 3] = 0.0
-        if self.minimap_bounds is None or own is None:
+        if self.minimap_bounds is None or own is None or self._intermission:
             return
         me = self._radar_point(np.asarray(own)[[0, 2]])[0]
         heading = np.array([math.sin(yaw), math.cos(yaw)])
@@ -2714,7 +2714,7 @@ class HUD:
     def set_radar_zones(self, zones=(), colors=()) -> None:
         """UPLINK zones on the minimap: discs of the zone radius in the holder's colour."""
         self.q_rgba[Q_RADAR_ZONES: Q_RADAR_ZONES + RADAR_ZONES, 3] = 0.0
-        if self.minimap_bounds is None:
+        if self.minimap_bounds is None or self._intermission:
             return
         reach = C.UPLINK_RADIUS / self.minimap_bounds[2] * MINIMAP_SIZE
         for i, (position, rgba) in enumerate(list(zip(zones, colors))[:RADAR_ZONES]):
@@ -2795,6 +2795,8 @@ class HUD:
             for index, line in enumerate(self.reward_lines):
                 line.origin = (0, 0) if active else (-0.5, 0)
                 line.position = (0.0, -0.405 - index * 0.027) if active else (0.13, -0.035 - index * 0.03)
+            if self.minimap is not None:                          # it would peek out above the report
+                self.minimap.enabled = not active
         self._set(self.status_text, status or "")
 
     def set_recap(self, text: str) -> None:
