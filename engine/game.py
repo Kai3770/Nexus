@@ -495,6 +495,8 @@ class NexusGame:
         for event in events:
             self._on_event(event)
         alive = bool(store.alive[0])
+        if self.dead and alive:                  # the spawn event can be lost after a long stall: trust the state
+            self.dead = False
         slot = int(store.weapons.slot[0])
         zoom = float(store.weapons.ads_zoom[0, slot])
         look = (0.0, 0.0)
@@ -1040,6 +1042,11 @@ class NexusGame:
                     scene.fx_smoke(position, radius, 0.0, burst=True)
                     audio.play_at("smoke", position, rig.cam_pos, right)
             self.grenades.remove_gid(gid)
+        elif kind == S.EV_ZONE:                     # burning since before we joined: no burst, no sound
+            _, position, equip, ticks_left = event
+            equip %= EQ.EQUIP_COUNT
+            self.zone_fx.append([int(EQ.KIND[equip]), np.asarray(position, dtype=np.float64), float(EQ.RADIUS[equip]),
+                                 self.clock + ticks_left / C.TICK_RATE, 0.0])
         elif kind == S.EV_STICK:
             _, gid, target, position = event
             slot = self.grenades.find(gid)

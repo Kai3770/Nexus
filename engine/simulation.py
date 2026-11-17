@@ -25,6 +25,7 @@ Nothing in this module touches sockets or the renderer.
 from __future__ import annotations
 
 import struct
+from contextlib import nullcontext
 
 import numpy as np
 
@@ -65,6 +66,7 @@ STREAK_USED = 1     # activated; for the lance the position is the marked spot
 STREAK_IMPACT = 2   # the lance strikes the position
 STREAK_BROKEN = 3   # an AEGIS shield was shot away
 EV_UPLINK = 14      # (EV_UPLINK, zone, team, action)   UPLINK zone changes hands
+EV_ZONE = 15        # (EV_ZONE, (x, y, z), equipment, ticks left)   a fire / smoke a joining client missed
 
 UPLINK_CAPTURED = 0     # ``team`` now holds the zone
 UPLINK_NEUTRALISED = 1  # ``team`` lost the zone (it is neutral again)
@@ -95,7 +97,8 @@ _TICKS = C.TICK_RATE
 class PlayerStore:
     """All per-player state for ``capacity`` slots, one array per component."""
 
-    OWNER_STRUCT = struct.Struct("<3f3fHHH5f2fBHHIdfIIfBIHBBBIIBBQHIIBB")   # ... loadout, shield, scan, streak
+    # movement and weapon timers are float64 like the simulation: a replay after a correction is bit-exact
+    OWNER_STRUCT = struct.Struct("<3d3dHHH5d2dBHHIddIIfBIHBBBIIBBQHIIBB")   # ... loadout, shield, scan, streak
     OWNER_SIZE = OWNER_STRUCT.size
 
     def __init__(self, capacity: int = C.MAX_PLAYERS):
@@ -669,14 +672,19 @@ class GameWorld:
         self.events.append((EV_SPAWN, row, tuple(position.tolist()), yaw))
 
     # ---- command execution -------------------------------------------------------------------
-    def step_commands(self, rows, buttons, yaw, pitch, cmd_tick):
-        """Simulate one command per row and use any equipment that was triggered."""
+    def step_commands(self, rows, buttons, yaw, pitch, cmd_tick, rewind=None):
+        """
+        Simulate one command per row and use any equipment that was triggered.
+        ``rewind(row)`` (the lag compensator) puts the hitboxes back to what that
+        player saw while a reward picks its target.
+        """
         rows = np.atleast_1d(np.asarray(rows, dtype=np.intp))
         held = (np.broadcast_to(np.asarray(buttons, dtype=np.uint16), rows.shape) & C.BTN_STREAK) != 0
         streak = held & ((self.store.weapons.prev_buttons[rows] & C.BTN_STREAK) == 0) & self.store.alive[rows]
         fired, lethal, tactical = simulate_commands(self.store, self.world, rows, buttons, yaw, pitch, cmd_tick)
         for row in rows[streak].tolist():
-            self.use_streak(int(row))
+            with rewind(int(row)) if rewind is not None else nullcontext():
+                self.use_streak(int(row))
         for row in rows[lethal].tolist():
             self.throw_equipment(int(row), int(self.store.equip[row, 0]))
         for row in rows[tactical].tolist():

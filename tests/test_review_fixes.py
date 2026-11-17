@@ -471,3 +471,153 @@ def test_drop_in_arena_text_cannot_carry_markup_and_broken_files_never_crash():
         finally:
             C.MAPS_DIR = original
             maps.reload_registry()
+
+
+# ---------------------------------------------------------------------------------------------------------
+#  Netcode and determinism (netcode review)
+# ---------------------------------------------------------------------------------------------------------
+from contextlib import nullcontext       # noqa: E402
+
+from engine import mathx as M           # noqa: E402
+
+
+def _client():
+    return N.GameClient("r", W.DEFAULT_LOADOUT, np.zeros((2, W.UPGRADE_COUNT), int), np.zeros(W.OPERATOR_COUNT, int))
+
+
+def test_a_client_that_stalled_for_minutes_skips_the_events_it_lost():
+    server, conn, _, _ = _server(29808)
+    blob = N.encode_event((S.EV_UPLINK, 0, 0, S.UPLINK_CAPTURED))
+    for _ in range(600):
+        server._queue_reliable(conn, blob)
+    assert len(conn.events) == 512 and server.stats["events_dropped"] >= 88      # memory stays bounded ...
+    client = _client()
+    client.event_seq = 1                                                           # ... it still expects event 2
+    first = conn.events[0][0]
+    data = N._U32.pack(first) + blob * 3
+    assert client._take_reliable(data, 0, 3) == len(data)
+    assert client.event_seq == first + 2 and len(client.events) == 3 and client.stats["event_gaps"] == 1
+    client._take_reliable(N._U32.pack(first + 1) + blob * 2, 0, 2)                # an ordinary resend changes nothing
+    assert client.event_seq == first + 2 and len(client.events) == 3
+
+
+def test_the_snapshot_names_the_arena_so_a_missed_map_change_cannot_strand_a_client():
+    config = N.ServerConfig(name="MAP", map_key="crucible", bot_fill=0, beacon=False, port=28199, seed=4)
+    server = N.host_local_game(config)
+    client = _client()
+    try:
+        client.connect("127.0.0.1", server.port)
+        deadline = time.time() + 4.0
+        while time.time() < deadline and client.state != N.CONNECTED:
+            client.update()
+            time.sleep(0.01)
+        with server.lock:
+            server.world.change_map((server.world.map_index + 1) % maps.MAP_COUNT)    # no EV_MATCH announces it
+            target = server.world.map_index
+        deadline = time.time() + 2.0
+        while time.time() < deadline and client.map_index != target:
+            client.update()
+            client.send_command(0, 0.0, 0.0)
+            time.sleep(C.TICK_DT)
+        assert client.state == N.CONNECTED and client.map_index == target and client.map_changed
+        assert client.loaded.data.checksum == server.world.loaded.data.checksum
+    finally:
+        client.disconnect()
+        server.stop()
+
+
+def test_the_lance_locks_on_to_what_the_player_saw():
+    game = S.GameWorld("datacore", mode=C.MODE_TDM, seed=3)
+    s = game.store
+    a, b = game.add_player("aim", team=0), game.add_player("strafe", team=1)
+    data = game.loaded.data
+    best = None                                                     # a long open sight line from a squad spawn
+    for spot in data.spawn_pos[data.spawn_team == 0]:
+        for yaw in np.linspace(-np.pi, np.pi, 72, endpoint=False):
+            eye = spot + np.array([0.0, C.EYE_HEIGHT_STAND, 0.0])
+            ahead = M.forward_vector(yaw, 0.0)
+            t, _, _ = game.world.raycast(eye, ahead, 200.0, C.LAYER_BULLET)
+            ground = spot + ahead * 12.0
+            drop, floor, _ = game.world.raycast(ground + np.array([0.0, 1.0, 0.0]), np.array([0.0, -1.0, 0.0]), 3.0,
+                                                C.LAYER_PLAYER)
+            if t[0] > 26.0 and floor[0] >= 0 and (best is None or t[0] > best[0]):
+                best = (float(t[0]), spot.copy(), float(yaw), ground + np.array([0.0, 1.0 - float(drop[0]), 0.0]))
+    _, spot, yaw, ground = best
+    side = M.forward_vector(yaw + np.pi / 2.0, 0.0)
+    lag = N.LagCompensator()
+    for k in range(30):                                             # b strafes at 6.5 m/s
+        s.move.pos[a], s.yaw[a] = spot, yaw
+        s.move.pos[b] = ground + side * 6.5 * (k - 29) * C.TICK_DT
+        game.tick += 1
+        s.refresh_hitboxes()
+        lag.record(game.tick, s)
+    view_tick = game.tick - 8                                       # interpolation delay plus latency
+    seen = lag.pos[view_tick % lag.history, b]
+    aim_yaw, aim_pitch = (float(v) for v in M.yaw_pitch_from_direction(seen + np.array([0.0, 1.2, 0.0])
+                                                                         - s.eye_position(a)[0]))
+    s.protect_until[:] = 0
+    s.streak_ready[a] = 1 << ST.LANCE
+    game.drain_events()
+    game.step_commands(np.array([a]), C.BTN_STREAK, aim_yaw, aim_pitch, s.cmd_tick[a] + 1,
+                       rewind=lambda row: lag.rewind(s, view_tick * C.TICK_MS, row))
+    used = [e for e in game.drain_events() if e[0] == S.EV_STREAK and e[3] == S.STREAK_USED]
+    assert used and np.linalg.norm(np.asarray(used[0][4]) - s.move.pos[b]) < 1.0      # under b's feet, not the wall
+
+
+def test_the_owner_state_travels_at_full_precision():
+    game, (a, _) = _world()
+    s = game.store
+    s.move.pos[a] = (1.0 / 3.0, 2.0 / 7.0, -5.0 / 9.0)
+    s.move.vel[a] = (0.1, -7.000000001, 1.0 / 3.0)
+    s.move.slide_t[a], s.move.air_t[a], s.weapons.bloom[a] = 0.123456789123, 1.0 / 7.0, 1.0 / 3.0
+    copy = S.PlayerStore(1)
+    copy.active[0] = True
+    copy.unpack_owner(0, s.pack_owner(a))
+    assert np.array_equal(copy.move.pos[0], s.move.pos[a]) and np.array_equal(copy.move.vel[0], s.move.vel[a])
+    assert copy.move.slide_t[0] == s.move.slide_t[a] and copy.move.air_t[0] == s.move.air_t[a]
+    assert copy.weapons.bloom[0] == s.weapons.bloom[a]                  # replays after a correction are bit-exact
+
+
+def test_a_full_server_snapshot_still_fits_one_datagram():
+    server, conn, _, _ = _server(29809)
+    while server.world.add_player("filler", is_bot=True) >= 0:
+        pass
+    sent = []
+    server._send_raw = lambda datagram, to: sent.append(datagram)
+    blob = N.encode_event((S.EV_HIT, 1, conn.pid, 10.0, 0, False, (0.0, 0.0, 0.0), True))
+    for _ in range(60):
+        server._queue_reliable(conn, blob)
+    server._send_snapshots(time.perf_counter())
+    assert sent and all(len(datagram) <= C.MAX_DATAGRAM for datagram in sent)
+
+
+def test_a_joiner_learns_about_fire_smoke_and_lances_already_in_play():
+    server = N.GameServer(N.ServerConfig(name="R", map_key="crucible", bot_fill=0, beacon=False, port=29810))
+    world = server.world
+    owner = world.add_player("thrower")
+    spot = world.store.move.pos[owner].copy()
+    world.zones.spawn(spot, 3.0, world.tick, world.tick + 300, owner, FIRE)
+    world.zones.spawn(spot + 4.0, 5.0, world.tick, world.tick + 480, owner, SMOKE)
+    world.strikes.append([world.tick + 60, spot + np.array([2.0, 0.0, 0.0]), owner])
+    client = _client()
+    client.connect("127.0.0.1", 29810)
+    server._handle_packet(client._request, ("10.0.0.8", 4100), 100.0)
+    conn = server.conns[("10.0.0.8", 4100)]
+    replay = [N.decode_event(blob, 0)[0] for _, blob in conn.events]
+    zones = sorted((e[2], e[3]) for e in replay if e[0] == S.EV_ZONE)
+    assert zones == sorted([(FIRE, 300), (SMOKE, 480)])
+    assert any(e[0] == S.EV_STREAK and e[2] == ST.LANCE and e[3] == S.STREAK_USED for e in replay)
+
+
+def test_the_view_time_of_a_shot_unwraps_after_49_days():
+    server, conn, _, _ = _server(29811)
+    store = server.world.store
+    seen = []
+    server.lag.rewind = lambda st, view_ms, row: (seen.append(view_ms), nullcontext())[1]
+    tick = (1 << 32) // C.TICK_MS + 12345                              # more than 2^32 ms of uptime
+    server.lag.newest = tick
+    true_view = int(tick * C.TICK_MS) - 140
+    store.cmd_tick[conn.pid] = tick
+    conn.fire[tick] = (1, true_view & 0xFFFFFFFF)                        # the client sends 32 bits
+    server._rewind_for(conn.pid)
+    assert seen == [float(true_view)]

@@ -294,6 +294,7 @@ signed save (`CONTRACT_TABLE` in `engine/config.py`).
   keeps every unacknowledged command. When the server's state for an acknowledged command
   differs from the prediction by more than 0.05 units (or in velocity, flags or weapon state),
   the client adopts the server state and replays all pending commands inside that frame.
+  Movement and weapon timers travel at full (float64) precision, so that replay is bit-exact.
   That owner state also carries the complete loadout (both weapon ids and every upgrade level),
   so a gun the server hands out -- the ESCALATION ladder -- reaches the prediction with the next
   snapshot, without a separate message that could arrive out of order. Scorestreak state (shield,
@@ -302,14 +303,21 @@ signed save (`CONTRACT_TABLE` in `engine/config.py`).
   and orientations with quaternion SLERP between the two snapshots around that time.
 * **Lag compensation.** Every shot carries a FIRE record with the client's view timestamp. The
   server keeps the last 30 ticks (500 ms) of every player's root transform, rewinds all hitboxes
-  to that timestamp, ray casts, applies the zone multiplier and restores the present.
-* **Snapshots** are delta compressed against the last one the client acknowledged.
+  to that timestamp, ray casts, applies the zone multiplier and restores the present. The ORBITAL
+  LANCE picks its target the same way, against what the player saw.
+* **Snapshots** are delta compressed against the last one the client acknowledged. Each one names
+  the arena (index and checksum), so a client that missed a map change still follows it.
+* **Reliable events** (kills, spawns, rewards, match flow) are resent until acknowledged. A client
+  that stalled for minutes skips the events the server had to drop instead of waiting for them
+  forever. A player who joins is told about the fire pools, smoke clouds and marked lances that
+  are already in play.
 * **Hardening.** Every inbound packet path was fuzzed in the code review. The server replaces non-finite
   view angles, lets a client's command clock run no faster than real time (a two second burst
   covers packet loss, so jumping ticks cannot skip fire rates or cooldowns), keeps at most 48 FIRE
   records per client, bounds its inbox and the packets it handles per tick, rate-limits connect
   attempts per address, never lets an unauthenticated connect request replace a live session,
-  strips `<` / `>` (Ursina markup) from every name it receives and survives a failing tick.
+  strips `<` / `>` (Ursina markup) from every name it receives, survives a failing tick and unwraps
+  the 32-bit view time of shots (a server may run for more than 49 days).
 * **Fair leftovers.** A player who leaves takes their grenades in flight, fire pools, pending lances
   and their claim on a fall with them, so a newcomer in the same slot is never credited with them.
   Between matches nobody scores: a player who falls off is put back on a spawn and blasts push nobody.
@@ -340,7 +348,7 @@ python -m pytest tests -q
 python tests/run_all.py
 ```
 
-The second command needs no pytest. 185 tests cover the math, the octree against a brute-force
+The second command needs no pytest. 192 tests cover the math, the octree against a brute-force
 reference, movement, weapons and the balance model, the simulation, all arenas and the injector
 (run-time registration, JSON drop-ins, malformed definitions, checksums), navigation on every
 storey, bot-only matches, the save system, wire codecs, rollback, live client / server sessions
@@ -359,7 +367,10 @@ command clocks running ahead, unbounded queues, session hijacking, markup in nam
 unreadable saves, non-finite numbers in saves, players who leave with grenades in flight, arenas
 without spawns for a squad, falls and blasts between matches, fall credit, posthumous kills, ties,
 the stock ESCALATION kit and its last step, spawn protection, hits that are no bullets, FIRST STRIKE,
-the roster at the end of a match, markup and broken files in drop-in arenas), a client
+the roster at the end of a match, markup and broken files in drop-in arenas, the event channel after
+a long stall, a map change only the snapshot announces, the lance's lag compensation, the owner state's
+precision, snapshot size on a full server, joiners and the fire, smoke and lances in play, 49-day view
+times), a client
 that stalls while baking, and two rendered end-to-end runs
 (under `xvfb-run` when there is no display; skipped if neither exists).
 

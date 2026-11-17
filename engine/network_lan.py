@@ -51,6 +51,7 @@ from . import equipment as EQ
 from . import maps
 from . import mathx as M
 from . import simulation as S
+from . import streaks as ST
 from . import weapons as W
 from .simulation import PlayerStore, simulate_commands
 
@@ -75,7 +76,7 @@ FRAME_HEADER = struct.Struct("<IIIIHBBBB")         # ack snapshot, ack event, cl
 EQUIP_BLOB = struct.Struct("<BB")                  # lethal, tactical (appended to the connect request)
 FIRE_RECORD = struct.Struct("<HIIB")               # shot seq, command tick, client view time (ms), weapon slot
 SNAP_HEADER = struct.Struct("<IIIHIHBBB")          # tick, baseline, ack cmd, ack shot, echo ms, hold ms, flags, n rel, n transient
-MATCH_STATE = struct.Struct("<HHHBB3B3b")          # scores, seconds left, phase, winner, uplink owners and charges
+MATCH_STATE = struct.Struct("<HHHBB3B3bBI")        # scores, seconds left, phase, winner, uplinks, arena + checksum
 ENT_MASKS = struct.Struct("<HHHH")                 # active, transform changed, orientation changed, state changed
 ROSTER_ENTRY = struct.Struct("<BBBHHIHB")          # id, team, flags, kills, deaths, score, ping, name length
 _U16 = struct.Struct("<H")
@@ -106,6 +107,7 @@ _EVENT_FORMATS = {
     S.EV_LADDER: struct.Struct("<BBBB"),            # player, step, cause, other player
     S.EV_STREAK: struct.Struct("<BBBhhh"),          # player, reward, action, position
     S.EV_UPLINK: struct.Struct("<BBB"),             # zone, team, action
+    S.EV_ZONE: struct.Struct("<hhhBH"),             # position, equipment, ticks left
     S.EV_REWARD: struct.Struct("<IHB"),             # credits, xp, reason
     S.EV_MATCH: struct.Struct("<BBBBI"),            # phase, winner, map, mode, map crc
 }
@@ -366,6 +368,8 @@ def encode_event(event: tuple) -> bytes:
         body = fmt.pack(event[1] & 0xFF, event[2] & 0xFF, event[3] & 0xFF, *quantize_position(event[4]))
     elif kind == S.EV_UPLINK:
         body = fmt.pack(event[1] & 0xFF, event[2] & 0xFF, event[3] & 0xFF)
+    elif kind == S.EV_ZONE:
+        body = fmt.pack(*quantize_position(event[1]), event[2] & 0xFF, min(max(int(event[3]), 0), 65535))
     elif kind == S.EV_REWARD:
         body = fmt.pack(int(event[2]) & 0xFFFFFFFF, min(int(event[3]), 65535), event[4])
     elif kind == S.EV_MATCH:
@@ -405,6 +409,8 @@ def decode_event(data: bytes, offset: int):
         event = (kind, f[0], f[1], f[2], _unq(f[3:6], C.POS_QUANT))
     elif kind == S.EV_UPLINK:
         event = (kind, f[0], f[1], f[2])
+    elif kind == S.EV_ZONE:
+        event = (kind, _unq(f[0:3], C.POS_QUANT), f[3], f[4])
     elif kind == S.EV_REWARD:
         event = (kind, f[0], f[1], f[2])
     else:
@@ -866,7 +872,8 @@ class GameServer:
         self._rng = random.Random(cfg.seed)
         self.conditioner = NetConditioner(cfg.fake_lag_ms, cfg.fake_jitter_ms, cfg.fake_loss, cfg.seed)
         self.stats = {"ticks": 0, "malformed": 0, "bytes_in": 0, "bytes_out": 0, "max_tick_ms": 0.0,
-                      "mean_tick_ms": 0.0, "fire_missing": 0, "connects": 0, "snapshots": 0, "full_snapshots": 0}
+                      "mean_tick_ms": 0.0, "fire_missing": 0, "connects": 0, "snapshots": 0, "full_snapshots": 0,
+                      "events_dropped": 0}
         self.lag.record(self.world.tick, self.world.store)
 
     # ---- lifecycle ---------------------------------------------------------------------
@@ -1056,7 +1063,21 @@ class GameServer:
         self.by_pid[pid] = conn
         self.stats["connects"] += 1
         self._send_ack(conn)
+        self._replay_world(conn)
         self.last_roster = 0.0
+
+    def _replay_world(self, conn: Connection) -> None:
+        """A joiner missed how the fire pools, smoke clouds and marked lances still in play began."""
+        world = self.world
+        zones = world.zones
+        for zone in np.flatnonzero(zones.active).tolist():
+            left = int(zones.until[zone]) - world.tick
+            if left > 0:
+                self._queue_reliable(conn, encode_event((S.EV_ZONE, tuple(zones.pos[zone].tolist()),
+                                                         int(zones.equip[zone]), left)))
+        for _impact, position, owner in world.strikes:
+            self._queue_reliable(conn, encode_event((S.EV_STREAK, owner if owner >= 0 else S.NO_PLAYER, ST.LANCE,
+                                                     S.STREAK_USED, tuple(np.asarray(position, dtype=float).tolist()))))
 
     def _send_ack(self, conn: Connection) -> None:
         world = self.world
@@ -1159,8 +1180,17 @@ class GameServer:
             self.stats["fire_missing"] += 1
             view_ms = self.lag.newest * C.TICK_MS - C.INTERP_DELAY_MS - conn.ping_ms * 0.5
         else:
-            view_ms = float(record[1])
+            now_ms = int(self.lag.newest * C.TICK_MS)
+            view_ms = float(now_ms + ((int(record[1]) - now_ms + 0x80000000) % 0x100000000 - 0x80000000))
         return self.lag.rewind(store, view_ms, row)
+
+    def _aim_rewind(self, row: int):
+        """Rollback context for aiming without a shot (the lance's lock-on): the ping-based view time."""
+        conn = self.by_pid.get(row)
+        if conn is None:
+            return nullcontext()
+        view_ms = self.lag.newest * C.TICK_MS - C.INTERP_DELAY_MS - conn.ping_ms * 0.5
+        return self.lag.rewind(self.world.store, view_ms, row)
 
     # ---- one simulation tick ---------------------------------------------------------------------------------
     def tick_once(self) -> None:
@@ -1201,7 +1231,7 @@ class GameServer:
                     break
                 row_array = np.array(rows, dtype=np.intp)
                 fired = world.step_commands(row_array, np.array(buttons, dtype=np.uint16), np.array(yaws),
-                                            np.array(pitches), np.array(ticks, dtype=np.int64))
+                                            np.array(pitches), np.array(ticks, dtype=np.int64), rewind=self._aim_rewind)
                 if fired.any():
                     world.resolve_shots(row_array[fired], rewind=self._rewind_for)
             world.end_tick()
@@ -1230,8 +1260,9 @@ class GameServer:
     def _queue_reliable(self, conn: Connection, blob: bytes) -> None:
         conn.events.append((conn.next_event_seq, blob))
         conn.next_event_seq += 1
-        if len(conn.events) > 512:
+        if len(conn.events) > 512:                     # a client stalled for minutes: it skips the gap later
             conn.events.popleft()
+            self.stats["events_dropped"] += 1
 
     def _route_events(self, events: list) -> None:
         if not events or not self.conns:
@@ -1271,7 +1302,7 @@ class GameServer:
         winner = world.winner if world.phase == C.PHASE_ENDED else S.NO_PLAYER
         match = MATCH_STATE.pack(min(int(world.team_scores[0]), 65535), min(int(world.team_scores[1]), 65535),
                                  min(int(np.ceil(world.time_left)), 65535), world.phase, winner & 0xFF,
-                                 *pack_uplinks(world))
+                                 *pack_uplinks(world), world.map_index & 0xFF, world.loaded.data.checksum & 0xFFFFFFFF)
         encoded: dict = {}
         for conn in self.conns.values():
             baseline = ring[conn.ack_snapshot % C.SNAPSHOT_RING] if conn.ack_snapshot > 0 else None
@@ -1710,7 +1741,7 @@ class GameClient:
         self._request = b""
         self.last_packet = 0.0
         self.stats = {"snapshots": 0, "dropped_snapshots": 0, "bytes_in": 0, "bytes_out": 0, "full_requests": 0,
-                      "events": 0, "malformed": 0}
+                      "events": 0, "malformed": 0, "event_gaps": 0}
 
     # ---- connection --------------------------------------------------------------------
     def connect(self, host: str, port: int, team: int = 255) -> None:
@@ -1901,8 +1932,11 @@ class GameClient:
         if tick <= self.last_snapshot_tick:
             self.stats["dropped_snapshots"] += 1
             return
-        score0, score1, seconds, phase, winner, *zones = MATCH_STATE.unpack_from(data, offset)
+        score0, score1, seconds, phase, winner, *zones, map_index, map_crc = MATCH_STATE.unpack_from(data, offset)
         offset += MATCH_STATE.size
+        if (map_index != self.map_index or map_crc != self.loaded.data.checksum) and not self._switch_map(map_index,
+                                                                                                       map_crc):
+            return
         self.uplink_owner, self.uplink_contested, self.uplink_charge = unpack_uplinks(zones)
         owner_offset = -1
         if flags & SNAP_HAS_OWNER:
@@ -1924,13 +1958,7 @@ class GameClient:
         self.time_left, self.phase, self.winner = seconds, phase, winner
         self.stats["snapshots"] += 1
         if n_reliable:
-            first_seq = _U32.unpack_from(data, offset)[0]
-            offset += 4
-            for index in range(n_reliable):
-                event, offset = decode_event(data, offset)
-                if first_seq + index == self.event_seq + 1:
-                    self.event_seq += 1
-                    self._deliver(event)
+            offset = self._take_reliable(data, offset, n_reliable)
         for _ in range(n_transient):
             event, offset = decode_event(data, offset)
             self._deliver(event)
@@ -1945,19 +1973,45 @@ class GameClient:
         if owner_offset >= 0 and self.predictor is not None:
             self.predictor.reconcile(ack_cmd, data, owner_offset)
 
+    def _take_reliable(self, data: bytes, offset: int, count: int) -> int:
+        """
+        In-order reliable events; returns the new offset.  A gap before the
+        first one means the server had to drop events this client never
+        acknowledged (it stalled for minutes): they are gone, so skip ahead
+        instead of waiting for them forever.  Snapshots carry everything that
+        must not be lost (arena, phase, scores, the own player's state).
+        """
+        first_seq = _U32.unpack_from(data, offset)[0]
+        offset += 4
+        if first_seq > self.event_seq + 1:
+            self.stats["event_gaps"] += 1
+            self.event_seq = first_seq - 1
+        for index in range(count):
+            event, offset = decode_event(data, offset)
+            if first_seq + index == self.event_seq + 1:
+                self.event_seq += 1
+                self._deliver(event)
+        return offset
+
+    def _switch_map(self, map_index: int, map_crc: int) -> bool:
+        """Load the arena the server plays now; False (and stop) when this installation lacks it."""
+        if not local_map_matches(map_index, map_crc):
+            self._abort(self.token, CONTENT_MISMATCH)
+            return False
+        self.map_index = map_index
+        self.loaded = maps.load_map(map_index)
+        self.predictor.set_world(self.loaded.world)
+        self.interp.clear()
+        self.map_changed = True
+        return True
+
     def _deliver(self, event: tuple) -> None:
         if event[0] == S.EV_MATCH:
             map_index, map_crc = event[3], event[5]
             event = event[:5]
-            if map_index != self.map_index or map_crc != self.loaded.data.checksum:
-                if not local_map_matches(map_index, map_crc):
-                    self._abort(self.token, CONTENT_MISMATCH)
-                    return
-                self.map_index = map_index
-                self.loaded = maps.load_map(map_index)
-                self.predictor.set_world(self.loaded.world)
-                self.interp.clear()
-                self.map_changed = True
+            if (map_index != self.map_index or map_crc != self.loaded.data.checksum) and not self._switch_map(
+                    map_index, map_crc):
+                return
         self.events.append(event)
         self.stats["events"] += 1
 
