@@ -416,9 +416,15 @@ def sign_data_string(data_string: str) -> str:
     return hashlib.sha256((data_string + SAVE_SALT).encode("utf-8")).hexdigest()
 
 
-def encode_save(profile: Profile) -> str:
-    """Profile -> text of a save file (header, sealed body, signature as the last line)."""
-    data_string = canonical_json(profile.to_dict())
+def encode_save(profile: Profile, stored_settings: dict | None = None) -> str:
+    """
+    Profile -> text of a save file (header, sealed body, signature as the last
+    line).  ``stored_settings`` replace settings that only apply to this run.
+    """
+    data = profile.to_dict()
+    if stored_settings:
+        data["settings"] = dict(data["settings"], **stored_settings)
+    data_string = canonical_json(data)
     sealed = base64.b64encode(crypto.seal(SAVE_KEY, data_string.encode("utf-8"))).decode("ascii")
     body = "\n".join(sealed[i:i + 76] for i in range(0, len(sealed), 76))
     return "%s\n%s\n%s%s\n" % (SAVE_HEADER, body, SIGNATURE_PREFIX, sign_data_string(data_string))
@@ -469,6 +475,7 @@ class ProfileManager:
         self.clock = time.time                    # replaceable in tests (contract rotation)
         self.save_lock = threading.Lock()         # one save at a time (game thread and sponsor thread)
         self.read_only = False                    # set when the save exists but cannot be read
+        self.run_settings: dict = {}              # stored values of settings a command-line switch overrides
         self.notices: list = []                   # (title, text, credits) for finished contracts
 
     # ---- persistence -------------------------------------------------------------
@@ -551,7 +558,7 @@ class ProfileManager:
                 self.profile.stats["playtime"] += max(now - self.session_started, 0.0)
                 self.session_started = now
                 self.profile.saved_at = now
-                text = encode_save(self.profile)
+                text = encode_save(self.profile, self.run_settings)
                 self.dirty = False
             try:
                 self.directory.mkdir(parents=True, exist_ok=True)
@@ -876,10 +883,19 @@ class ProfileManager:
             return notices
 
     def set_setting(self, key: str, value) -> None:
+        """A setting the player chose (menu, or the frame-rate governor): saved from now on."""
         with self.lock:
             if key in self.profile.settings:
                 self.profile.settings[key] = value
+                self.run_settings.pop(key, None)
                 self.dirty = True
+
+    def override_setting(self, key: str, value) -> None:
+        """A command-line switch: the setting changes for this run only; saves keep the stored value."""
+        with self.lock:
+            if key in self.profile.settings:
+                self.run_settings.setdefault(key, self.profile.settings[key])
+                self.profile.settings[key] = value
 
     def set_name(self, name: str) -> None:
         with self.lock:

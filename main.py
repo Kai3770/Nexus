@@ -84,11 +84,11 @@ def main(argv=None) -> int:
         width, height = 1600, 900
     settings = profiles.profile.settings                     # command line switches override the profile for this run
     if args.quality is not None:
-        settings["quality"] = args.quality
+        profiles.override_setting("quality", args.quality)
     if args.fps_limit is not None:
-        settings["fps_limit"] = max(args.fps_limit, 0)
+        profiles.override_setting("fps_limit", max(args.fps_limit, 0))
     if args.no_dynamic_resolution:
-        settings["dynamic_resolution"] = False
+        profiles.override_setting("dynamic_resolution", False)
     vsync = (bool(settings["vsync"]) or args.vsync) and not args.no_vsync
 
     from ursina import Entity, Ursina, application, window

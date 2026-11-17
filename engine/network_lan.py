@@ -1741,7 +1741,8 @@ class GameClient:
         self._request = b""
         self.last_packet = 0.0
         self.stats = {"snapshots": 0, "dropped_snapshots": 0, "bytes_in": 0, "bytes_out": 0, "full_requests": 0,
-                      "events": 0, "malformed": 0, "event_gaps": 0}
+                      "events": 0, "malformed": 0, "event_gaps": 0, "stale_transients": 0}
+        self._now = 0.0                       # time of the update() that is draining the inbox
 
     # ---- connection --------------------------------------------------------------------
     def connect(self, host: str, port: int, team: int = 255) -> None:
@@ -1839,6 +1840,10 @@ class GameClient:
         if self.thread is not None and self.thread is not threading.current_thread():
             self.thread.join(timeout=1.0)
         self.thread = None
+        if self.conditioner.is_alive():
+            old = self.conditioner
+            old.stop()
+            self.conditioner = NetConditioner(old.latency * 1000.0, old.jitter * 1000.0, old.loss)
         if self.sock is not None:
             self.sock.close()
             self.sock = None
@@ -1856,6 +1861,7 @@ class GameClient:
             elif now - self._last_request >= C.CONNECT_RETRY_INTERVAL:
                 self._send(self._request)
                 self._last_request = now
+        self._now = now
         inbox = self.inbox
         while inbox:
             data, addr, received = inbox.popleft()
@@ -1959,9 +1965,12 @@ class GameClient:
         self.stats["snapshots"] += 1
         if n_reliable:
             offset = self._take_reliable(data, offset, n_reliable)
-        for _ in range(n_transient):
-            event, offset = decode_event(data, offset)
-            self._deliver(event)
+        if self._now - received > C.STALE_EVENT_AGE:      # queued while the game stalled: no burst of old tracers
+            self.stats["stale_transients"] += n_transient
+        else:
+            for _ in range(n_transient):
+                event, offset = decode_event(data, offset)
+                self._deliver(event)
         self.sync.add(tick * C.TICK_MS, received * 1000.0)
         if echo_ms:
             rtt = ((int(received * 1000.0) & 0xFFFFFFFF) - echo_ms - hold_ms) & 0xFFFFFFFF

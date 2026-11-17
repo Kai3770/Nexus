@@ -66,7 +66,8 @@ nie auseinanderlaufen. Balance-Prüfungen (`validate_balance`, `validate_equipme
 | Spielregeln | 14 Funde behoben (u. a. Nachrücker erbt Granaten, Einfrieren ohne Spawns, Punkte in der Pause, Gleichstände, ESCALATION-Kit, Spawnschutz, Lanzenziel) |
 | Client | 14 Funde behoben (Endstand für MVP/Report, Trefferquote, HUD über Menüs, 4:3, Pause zwischen Matches, Eingabe nach RESUME) |
 | Netcode | 5 Funde behoben (Ereigniskanal nach langem Hänger, Arena im Snapshot, Lanze mit Lag-Kompensation, Owner-State float64, Zustand für neue Spieler, 49-Tage-Überlauf) |
-| Tests | 192 insgesamt; jede Regression schlägt auf dem alten Code fehl; Szenen bei 16:9 und 4:3 gerendert und geprüft |
+| Performance und Stabilität | Gemessen ohne Rückschritt (Server 1,65–2,5 ms pro Tick, Client 5 ms, Speicher konstant); 4 Funde behoben (alte Schüsse nach Hänger, Schalter nur für einen Lauf, Threads beim Schließen, schwache Tests) |
+| Tests | 195 insgesamt; jede Regression schlägt auf dem alten Code fehl; Szenen bei 16:9 und 4:3 gerendert und geprüft |
 
 ## Sprint 4 – Technik und Hosting
 

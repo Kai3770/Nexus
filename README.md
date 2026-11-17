@@ -309,8 +309,9 @@ signed save (`CONTRACT_TABLE` in `engine/config.py`).
   the arena (index and checksum), so a client that missed a map change still follows it.
 * **Reliable events** (kills, spawns, rewards, match flow) are resent until acknowledged. A client
   that stalled for minutes skips the events the server had to drop instead of waiting for them
-  forever. A player who joins is told about the fire pools, smoke clouds and marked lances that
-  are already in play.
+  forever, and other players' shots that waited in its inbox are not replayed as a burst of old
+  tracers and sounds. A player who joins is told about the fire pools, smoke clouds and marked
+  lances that are already in play.
 * **Hardening.** Every inbound packet path was fuzzed in the code review. The server replaces non-finite
   view angles, lets a client's command clock run no faster than real time (a two second burst
   covers packet loss, so jumping ticks cannot skip fire rates or cooldowns), keeps at most 48 FIRE
@@ -348,7 +349,7 @@ python -m pytest tests -q
 python tests/run_all.py
 ```
 
-The second command needs no pytest. 192 tests cover the math, the octree against a brute-force
+The second command needs no pytest. 195 tests cover the math, the octree against a brute-force
 reference, movement, weapons and the balance model, the simulation, all arenas and the injector
 (run-time registration, JSON drop-ins, malformed definitions, checksums), navigation on every
 storey, bot-only matches, the save system, wire codecs, rollback, live client / server sessions
@@ -370,7 +371,8 @@ the stock ESCALATION kit and its last step, spawn protection, hits that are no b
 the roster at the end of a match, markup and broken files in drop-in arenas, the event channel after
 a long stall, a map change only the snapshot announces, the lance's lag compensation, the owner state's
 precision, snapshot size on a full server, joiners and the fire, smoke and lances in play, 49-day view
-times), a client
+times, command-line switches that last one run, the latency simulator stopping with its client, old
+shots after a stall), a client
 that stalls while baking, and two rendered end-to-end runs
 (under `xvfb-run` when there is no display; skipped if neither exists).
 

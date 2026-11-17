@@ -44,6 +44,7 @@ def _server(port):
     client.connect("127.0.0.1", port)
     addr = ("10.0.0.5", 41000)
     server._handle_packet(client._request, addr, 100.0)
+    client.close()                                  # only its request is needed; no receive thread left behind
     return server, server.conns[addr], addr, client._request
 
 
@@ -104,6 +105,7 @@ def test_an_unauthenticated_connect_cannot_replace_a_live_session():
     server, conn, addr, request = _server(29804)
     spoof = N.GameClient("x", W.DEFAULT_LOADOUT, np.zeros((2, W.UPGRADE_COUNT), int), np.zeros(W.OPERATOR_COUNT, int))
     spoof.connect("127.0.0.1", 29804)
+    spoof.close()
     token = conn.token
     server._handle_packet(spoof._request, addr, conn.last_recv + 0.5)
     assert server.conns[addr].token == token                                         # ignored while it is alive
@@ -131,6 +133,7 @@ def test_names_from_the_network_lose_markup():
     client = N.GameClient("<scale:x>", W.DEFAULT_LOADOUT, np.zeros((2, W.UPGRADE_COUNT), int),
                           np.zeros(W.OPERATOR_COUNT, int))
     client.connect("127.0.0.1", 29806)
+    client.close()
     server._handle_packet(client._request, ("10.0.0.7", 4000), 100.0)
     assert "<" not in server.world.store.names[0] and ">" not in server.world.store.names[0]
     beacon = N.encode_beacon("<scale:400>ARENA", 28016, 1, 8, 0, 0, 0, uid=7, map_crc=0)    # a forged beacon
@@ -601,6 +604,7 @@ def test_a_joiner_learns_about_fire_smoke_and_lances_already_in_play():
     world.strikes.append([world.tick + 60, spot + np.array([2.0, 0.0, 0.0]), owner])
     client = _client()
     client.connect("127.0.0.1", 29810)
+    client.close()
     server._handle_packet(client._request, ("10.0.0.8", 4100), 100.0)
     conn = server.conns[("10.0.0.8", 4100)]
     replay = [N.decode_event(blob, 0)[0] for _, blob in conn.events]
@@ -621,3 +625,64 @@ def test_the_view_time_of_a_shot_unwraps_after_49_days():
     conn.fire[tick] = (1, true_view & 0xFFFFFFFF)                        # the client sends 32 bits
     server._rewind_for(conn.pid)
     assert seen == [float(true_view)]
+
+
+# ---------------------------------------------------------------------------------------------------------
+#  Stability, tests and docs (performance review)
+# ---------------------------------------------------------------------------------------------------------
+def test_command_line_switches_last_one_run():
+    pm = _manager()
+    stored = dict(pm.profile.settings)
+    pm.override_setting("quality", 0)
+    pm.override_setting("fps_limit", 30)
+    assert pm.profile.settings["quality"] == 0 and pm.profile.settings["fps_limit"] == 30 and pm.save()
+    again = SS.ProfileManager(pm.directory)
+    assert again.load() == "ok"
+    assert again.profile.settings["quality"] == stored["quality"] and again.profile.settings["fps_limit"] == stored["fps_limit"]
+    pm.set_setting("quality", 1)                                                  # chosen in the menu: kept
+    assert pm.save()
+    again = SS.ProfileManager(pm.directory)
+    again.load()
+    assert again.profile.settings["quality"] == 1 and again.profile.settings["fps_limit"] == stored["fps_limit"]
+
+
+def test_closing_a_client_stops_its_latency_simulator():
+    client = N.GameClient("lag", W.DEFAULT_LOADOUT, np.zeros((2, W.UPGRADE_COUNT), int), np.zeros(W.OPERATOR_COUNT, int),
+                          fake_lag_ms=30.0)
+    client.connect("127.0.0.1", 29812)
+    old = client.conditioner
+    assert old.is_alive()
+    client.close()
+    old.join(timeout=2.0)
+    assert not old.is_alive() and not client.conditioner.is_alive() and client.conditioner.latency == old.latency
+
+
+def test_shots_queued_during_a_stall_are_not_replayed():
+    config = N.ServerConfig(name="STALL", map_key="crucible", mode=C.MODE_FFA, bot_fill=6, max_players=8, beacon=False,
+                            port=28196, seed=4)
+    server = N.host_local_game(config)
+    client = _client()
+    try:
+        client.connect("127.0.0.1", server.port)
+        deadline = time.time() + 4.0
+        while time.time() < deadline and client.state != N.CONNECTED:
+            client.update()
+            time.sleep(0.01)
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            client.update()
+            client.send_command(0, 0.0, 0.0)
+            time.sleep(C.TICK_DT)
+        time.sleep(4.0)                                                           # the game stalls; bots keep firing
+        fresh = 0                                                                 # shots that may still play
+        cutoff = time.perf_counter() - C.STALE_EVENT_AGE
+        for data, _, received in list(client.inbox):
+            if N.HEADER.unpack_from(data, 0)[1] == N.PKT_SNAPSHOT and received >= cutoff:
+                fresh += N.SNAP_HEADER.unpack_from(data, N.HEADER.size)[-1]
+        events = client.update()
+        shots = sum(1 for e in events if e[0] == S.EV_SHOT)
+        assert client.state == N.CONNECTED and client.stats["stale_transients"] > 0
+        assert shots <= fresh                                                     # no burst of old tracers and sounds
+    finally:
+        client.disconnect()
+        server.stop()

@@ -409,7 +409,7 @@ def test_a_stalled_main_thread_does_not_lose_the_connection():
             client.update()
             client.send_command(C.BTN_FORWARD, 0.0, 0.0)
             time.sleep(C.TICK_DT)
-        assert client.state == N.CONNECTED and client.predictor.corrections < 30
+        assert client.state == N.CONNECTED and client.predictor.corrections <= 2     # prediction stays in step
     finally:
         C.CONNECTION_TIMEOUT, C.KEEPALIVE_INTERVAL = original
         client.disconnect()

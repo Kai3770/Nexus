@@ -390,7 +390,7 @@ def run_bot_match(map_key="crucible", bots: int = 8, ticks: int = 3600, difficul
         game.add_player("BOT-%02d" % index, is_bot=True)
     controller = BotController(game, difficulty, seed=seed + 1)
     game.drain_events()
-    shots = hits = kills = explosions = void_deaths = ladder_events = streaks_used = lance_impacts = 0
+    shots = hits = kills = hostile_kills = explosions = void_deaths = ladder_events = streaks_used = lance_impacts = 0
     worst = 0.0
     started = time.perf_counter()
     for _ in range(ticks):
@@ -407,6 +407,7 @@ def run_bot_match(map_key="crucible", bots: int = 8, ticks: int = 3600, difficul
             shots += kind == S.EV_SHOT
             hits += kind == S.EV_HIT
             kills += kind == S.EV_KILL
+            hostile_kills += kind == S.EV_KILL and not event[4] & S.KILL_SUICIDE
             explosions += kind == S.EV_EXPLOSION
             ladder_events += kind == S.EV_LADDER
             streaks_used += kind == S.EV_STREAK and event[3] == S.STREAK_USED
@@ -416,7 +417,8 @@ def run_bot_match(map_key="crucible", bots: int = 8, ticks: int = 3600, difficul
     elapsed = time.perf_counter() - started
     store = game.store
     return {
-        "ticks": ticks, "shots": int(shots), "hits": int(hits), "kills": int(kills), "explosions": int(explosions),
+        "ticks": ticks, "shots": int(shots), "hits": int(hits), "kills": int(kills), "hostile_kills": int(hostile_kills),
+        "explosions": int(explosions),
         "team_scores": game.team_scores.tolist(), "matches": game.matches_played,
         "mean_tick_ms": elapsed / ticks * 1000.0, "worst_tick_ms": worst * 1000.0,
         "min_y": float(store.move.pos[store.active & store.alive, 1].min()) if np.any(store.active & store.alive) else 0.0,

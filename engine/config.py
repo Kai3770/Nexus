@@ -143,6 +143,7 @@ MAX_CMDS_PER_TICK = 4
 PENDING_CMD_CAPACITY = 256
 EVENT_BYTES_PER_SNAPSHOT = 520
 ROSTER_INTERVAL = 1.0
+STALE_EVENT_AGE = 0.25                   # other players' shots that waited longer (a stalled client) are not replayed
 
 POS_QUANT = 128.0
 VEL_QUANT = 256.0
