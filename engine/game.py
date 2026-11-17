@@ -445,6 +445,7 @@ class NexusGame:
     def _enter_match(self) -> None:
         self.state = STATE_PLAYING
         self.paused = False
+        self.mouse_hold = True                   # the click on START / JOIN is no shot either
         self.menus.hide()
         self.hud.set_visible(True)
         self.hud.set_center("")
