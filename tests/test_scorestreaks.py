@@ -139,21 +139,21 @@ def test_the_orbital_lance_marks_the_crosshair_and_lands_after_the_warning():
     s.move.pos[b] = (2.0, 0.0, 14.0)
     s.move.pos[c] = (14.0, 0.0, 14.0)                                    # far outside the blast
     s.refresh_hitboxes()
-    target = np.array([2.0, 0.0, 14.5])
+    target = np.array([2.0, 0.0, 14.5])                                  # the ground just behind b ...
     s.yaw[a], s.pitch[a] = M.yaw_pitch_from_direction(target - s.eye_position(a)[0])
     s.streak[a] = 7
     s.streak_ready[a] = 1 << ST.LANCE
     events = press(game, a)
     assert [(e[2], e[3]) for e in events] == [(ST.LANCE, S.STREAK_USED)]
     marked = np.asarray(events[0][4])
-    assert np.linalg.norm(marked - target) < 0.4
+    assert np.linalg.norm(marked - s.move.pos[b]) < 0.05                 # ... but the ray meets b first: b's feet
     for _ in range(ST.duration_ticks(ST.LANCE) - 1):
         game.end_tick()
     assert s.alive[b] and s.health[b] == 100.0                           # the warning time is honoured
     game.end_tick()
     events = game.drain_events()
     assert any(e[0] == S.EV_STREAK and e[3] == S.STREAK_IMPACT for e in events)
-    assert (S.EV_KILL, a, b, LANCE_KILL, S.KILL_EXPLOSIVE) in events
+    assert (S.EV_KILL, a, b, LANCE_KILL, S.KILL_EXPLOSIVE | S.KILL_FIRST) in events
     assert s.health[a] == 100.0 and s.health[c] == 100.0                 # the caller is spared, c is out of reach
     assert s.streak[a] == 7                                              # reward kills never extend the streak
 

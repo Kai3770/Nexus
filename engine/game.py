@@ -170,7 +170,6 @@ class NexusGame:
         self.killer = ""
         self.streak = 0
         self.result = ""
-        self.result_sub = ""
         self.banner = ""
         self.banner_sub = ""
         self.banner_rgb = R.HUD_GOLD
@@ -183,6 +182,11 @@ class NexusGame:
         self.uplink_pos = None                    # UPLINK zone positions of the loaded arena
         self.report = MatchReport()               # this match's stats and medals
         self.report_text = ""
+        self.report_due = False                   # match over, waiting for the final roster (MVP)
+        self.report_deadline = 0.0                # ... or until this local time at the latest
+        self.result_end = 0.0                     # local time the next match starts (intermission countdown)
+        self.intro_until = 0.0                    # the ESCALATION intro banner owns the centre until then
+        self.mouse_hold = False                   # the click that closed the pause menu is not a shot
         self.orbit = 0.0
         self.last_corrections = 0
         self.backdrop_map = ""
@@ -283,6 +287,9 @@ class NexusGame:
     def resume(self) -> None:
         self.paused = False
         self.menus.hide()
+        self.hud.set_visible(True)
+        self.mouse_hold = True
+        self.latched = 0
         mouse.locked = True
         self._set_picking(False)
 
@@ -317,6 +324,12 @@ class NexusGame:
         self.zone_fx.clear()
         self._reset_rewards()
         self.stun_end = 0.0
+        self.banner_ttl = 0.0
+        self.intro_until = 0.0
+        self.result = ""
+        self.dead = False
+        self.hud.reset()
+        self.scene.post.set_stun(0.0)
 
     def quit(self) -> None:
         self._shutdown_session()
@@ -338,8 +351,9 @@ class NexusGame:
                     self.paused = True
                     mouse.locked = False
                     self._set_picking(True)
+                    self.hud.set_visible(False)                 # menus own the screen while they are open
                     self.menus.show("pause")
-            elif not self.paused and key in KEY_LATCH:
+            elif not self.paused and key in KEY_LATCH and not (self.mouse_hold and key == "left mouse down"):
                 self.latched |= KEY_LATCH[key]
         elif self.state == STATE_MENU and key == "escape" and self.menus.current not in (None, "main"):
             self.menus.show("main")
@@ -353,6 +367,11 @@ class NexusGame:
         for key, bit in HELD_BUTTONS:
             if held_keys[key]:
                 buttons |= bit
+        if self.mouse_hold:                       # after RESUME the mouse buttons count once released
+            if held_keys["left mouse"] or held_keys["right mouse"]:
+                buttons &= ~(C.BTN_SHOOT | C.BTN_ADS)
+            else:
+                self.mouse_hold = False
         return buttons
 
     # ================================================================== #
@@ -446,7 +465,6 @@ class NexusGame:
         mouse.locked = self.autopilot is None
         self._set_picking(False)
         self.apply_settings()
-        self.audio.play("respawn", 0.6)
 
     def _load_map_visuals(self) -> None:
         client = self.client
@@ -652,6 +670,7 @@ class NexusGame:
         self.alert_end = 0.0
         self.report.reset()
         self.report_text = ""
+        self.report_due = False
         self.hud.set_recap("")
         self.hud.set_alert("")
 
@@ -905,17 +924,18 @@ class NexusGame:
         kind = event[0]
         me = client.pid
         if kind == S.EV_HIT:
-            _, victim, damage, zone, killed, point = event
+            _, victim, damage, zone, killed, point, gun = event
             headshot = zone == C.ZONE_HEAD
             hud.hitmarker(headshot, killed)
             scene.fx_damage_number(point, damage, headshot, killed)
             scene.fx_hit(point, headshot)
             scene.characters.hit(victim)
             audio.play("headshot" if headshot else "hit", 0.75)
-            self.pm.record("hits")
+            if gun:                                    # blasts, fire, hatchets and the lance add damage only
+                self.pm.record("hits")
             self.pm.record("damage", damage)
             self.combat.gave(victim, damage)
-            self._medals(self.report.hit(damage, headshot))
+            self._medals(self.report.hit(damage, headshot, counted=gun))
         elif kind == S.EV_DAMAGE:
             _, attacker, damage, _zone, source = event
             strength = min(damage / 40.0, 1.5)
@@ -929,7 +949,8 @@ class NexusGame:
             self.combat.took(attacker if attacker != S.NO_PLAYER else -1, damage, _zone == C.ZONE_HEAD)
         elif kind == S.EV_KILL:
             _, killer, victim, weapon, flags = event
-            if C.EQUIP_KILL_BASE <= weapon < C.EQUIP_KILL_BASE + EQ.EQUIP_COUNT:
+            equipment = C.EQUIP_KILL_BASE <= weapon < C.EQUIP_KILL_BASE + EQ.EQUIP_COUNT   # grenades, hatchet, fire
+            if equipment:
                 weapon_name = EQ.EQUIP_NAMES[weapon - C.EQUIP_KILL_BASE]
             elif ST.is_streak_kill(weapon):
                 weapon_name = ST.STREAK_NAMES[weapon - C.STREAK_KILL_BASE]
@@ -943,8 +964,8 @@ class NexusGame:
                 tag = "HEADSHOT  " if flags & S.KILL_HEADSHOT else ""
                 line = "%s  [%s%s]  %s" % (self._name(killer), tag, weapon_name, self._name(victim))
             mine = me in (killer, victim)
-            self._medals(self.report.kill(killer, victim, me, self.clock, bool(flags & S.KILL_EXPLOSIVE),
-                                          ST.is_streak_kill(weapon), bool(flags & S.KILL_SUICIDE)))
+            self._medals(self.report.kill(killer, victim, me, self.clock, equipment, ST.is_streak_kill(weapon),
+                                          bool(flags & S.KILL_SUICIDE), bool(flags & S.KILL_FIRST)))
             hud.push_kill(line, R.HUD_CRIMSON if flags & S.KILL_HEADSHOT else (R.HUD_GOLD if mine else R.HUD_WHITE))
             if 0 <= victim < C.MAX_PLAYERS and victim != me and client.view.active[victim]:
                 scene.fx_death(client.view.pos[victim], self._team_color(victim))
@@ -960,7 +981,7 @@ class NexusGame:
                 self.pm.record("best_streak", self.streak, maximum=True)
                 if flags & S.KILL_HEADSHOT:
                     self.pm.record("headshots")
-                if flags & S.KILL_EXPLOSIVE and not ST.is_streak_kill(weapon):
+                if equipment:
                     self.pm.record("grenade_kills")
                 audio.play("kill", 0.8)
         elif kind == S.EV_SPAWN:
@@ -976,7 +997,7 @@ class NexusGame:
                 self.death_note = ""
                 self.combat.reset()
                 hud.set_recap("")
-                if client.mode == C.MODE_ESC and client.predictor is not None:
+                if client.mode == C.MODE_ESC and client.predictor is not None and self.clock >= self.intro_until:
                     ws = client.predictor.store.weapons
                     gun = int(ws.weapon[0, int(ws.slot[0])])
                     self._show_banner("WEAPON %d / %d" % (W.ESCALATION_STEP_OF.get(gun, 0) + 1, W.ESCALATION_STEPS),
@@ -1073,25 +1094,46 @@ class NexusGame:
                 else:
                     won = (winner == client.team) if C.team_mode(mode) else (winner == me)
                     self.result = "VICTORY" if won else "DEFEAT"
-                self.result_sub = "next match starts in %d seconds" % int(C.INTERMISSION_TIME)
-                best = max(client.roster.values(), key=lambda e: (e.score, e.kills), default=None)
-                self._medals(self.report.finish(best.pid if best is not None and best.score > 0 else -1, me))
-                self.report_text = self.report.summary(best.name if best is not None else "",
-                                                       best.score if best is not None else 0, mode == C.MODE_UPLINK)
+                self.result_end = self.clock + C.INTERMISSION_TIME
                 self.pm.record("matches")
                 if won:
                     self.pm.record("wins")
                 audio.play("victory" if won else "defeat", 0.8)
-                self.pm.save()
+                self.report_due = True                     # the MVP needs the roster taken after the end
+                self.report_deadline = self.clock + 2.0
+                self.report_text = self._report_summary()  # provisional until then
+                self._finish_report()
             else:
                 self.result = ""
                 self.death_note = ""
                 self.report.reset()
                 self.report_text = ""
+                self.report_due = False
                 if mode == C.MODE_ESC:
                     self._show_banner(C.MODE_NAMES[mode], "climb %d guns  -  first up: %s" % (
                         W.ESCALATION_STEPS, W.WEAPON_NAMES[W.escalation_weapon(0)]), R.HUD_GOLD, 3.0)
+                    self.intro_until = self.clock + 3.0
                 self.streak = 0
+
+    def _best(self):
+        """Roster entry of the match's best player (score, then eliminations)."""
+        return max(self.client.roster.values(), key=lambda e: (e.score, e.kills), default=None)
+
+    def _report_summary(self) -> str:
+        best = self._best()
+        return self.report.summary(best.name if best is not None else "", best.score if best is not None else 0,
+                                   self.client.mode == C.MODE_UPLINK)
+
+    def _finish_report(self, force: bool = False) -> None:
+        """End-of-match medals and the final report, from the first roster the server took after the end."""
+        client = self.client
+        if not self.report_due or not (force or client.roster_phase == C.PHASE_ENDED):
+            return
+        self.report_due = False
+        best = self._best()
+        self._medals(self.report.finish(best.pid if best is not None and best.score > 0 else -1, client.pid))
+        self.report_text = self._report_summary()
+        self.pm.save()
 
     # ================================================================== #
     #  HUD
@@ -1130,8 +1172,12 @@ class NexusGame:
             hud.set_match(client.mode, client.scores, client.time_left, client.team, own.kills if own is not None else 0,
                           client.score_limit)
         ended = client.phase == C.PHASE_ENDED
+        if self.report_due:
+            self._finish_report(self.clock >= self.report_deadline)
         show_board = ended or bool(held_keys["tab"])
-        hud.set_report(self.report_text if ended else None)
+        between = ended and bool(self.result)
+        hud.set_report(self.report_text if ended else None, self.result if between else "MATCH REPORT",
+                       R.HUD_GOLD if self.result in ("VICTORY", "") else R.HUD_WHITE)
         if show_board:
             entries = sorted(client.roster.values(), key=lambda e: (e.team if C.team_mode(client.mode) else 0, -e.score, -e.kills))
             rows = []
@@ -1146,8 +1192,14 @@ class NexusGame:
         else:
             hud.set_scoreboard(False)
         self.banner_ttl = max(self.banner_ttl - dt, 0.0)
-        if ended and self.result:
-            hud.set_center(self.result, self.result_sub, R.HUD_GOLD if self.result == "VICTORY" else R.HUD_WHITE)
+        if between:                    # the boards fill the middle: news and the countdown go under them
+            if self.banner_ttl > 0.0:
+                status = "%s  -  %s" % (self.banner, self.banner_sub) if self.banner_sub else self.banner
+            else:
+                status = "next match starts in %d seconds" % max(int(math.ceil(self.result_end - self.clock)), 0)
+            hud.set_intermission(status)
+            hud.set_center("")
+            hud.set_hint("")
         elif self.dead:
             parts = (["by %s" % self.killer] if self.killer else []) + ([self.death_note] if self.death_note else [])
             hud.set_center("ELIMINATED", "  -  ".join(parts + ["respawning"]), R.HUD_CRIMSON)
@@ -1155,6 +1207,8 @@ class NexusGame:
             hud.set_center(self.banner, self.banner_sub, self.banner_rgb)
         else:
             hud.set_center("")
+        if not between:
+            hud.set_intermission(None)
         if self.hint_timer > 0.0:
             self.hint_timer -= dt
             if self.hint_timer <= 0.0:

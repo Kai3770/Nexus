@@ -400,12 +400,18 @@ class MapAssembler:
         return data
 
 
+def _plain(text, limit: int) -> str:
+    """Text from a drop-in file as the UI may show it: no markup brackets, printable, bounded."""
+    return "".join(ch for ch in str(text) if ch.isprintable() and ch not in "<>")[:limit].strip()
+
+
 def _normalise_definition(key: str, definition: dict) -> dict:
     """Validate a registry entry and convert JSON lists to tuples."""
     if not isinstance(definition, dict):
         raise ValueError("map %r: definition must be a dictionary" % key)
     known = set(known_texture_types())
-    clean = {"name": str(definition.get("name", key.upper())), "description": str(definition.get("description", "")),
+    clean = {"name": _plain(definition.get("name", ""), 24) or _plain(key.upper(), 24) or "ARENA",
+             "description": _plain(definition.get("description", ""), 120),
              "mirror": bool(definition.get("mirror", False)), "environment": dict(definition.get("environment", {})),
              "center": [], "half": []}
     for section in ("center", "half"):
@@ -479,8 +485,11 @@ def reload_registry() -> tuple:
             try:
                 definition = json.loads(path.read_text(encoding="utf-8"))
                 key = str(definition.get("key", path.stem)).lower()
-                _REGISTRY[key] = _normalise_definition(key, definition)
-            except (ValueError, OSError, AttributeError) as error:
+                clean = _normalise_definition(key, definition)
+                if not any(entry[6] == "spawn" for entry in clean["center"] + clean["half"]):
+                    raise ValueError("map %r has no spawn point" % key)
+                _REGISTRY[key] = clean
+            except (ValueError, TypeError, OSError, AttributeError) as error:   # a broken file never stops the game
                 REGISTRY_ERRORS.append("%s: %s" % (path.name, error))
     return tuple(_REGISTRY)
 

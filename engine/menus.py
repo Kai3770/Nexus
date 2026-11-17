@@ -41,6 +41,16 @@ def money(value: float) -> str:
     return "CR " + SS.format_number(value)
 
 
+DESIGN_HALF_WIDTH = 16.0 / 9.0 * 0.5            # the screens are laid out on a 16:9 canvas
+
+
+def ui_fit() -> tuple:
+    """``(scale, half width)``: narrower windows (4:3, 5:4) shrink the 16:9 layout as a whole, wider ones
+    keep the scale and use the extra room at the sides."""
+    half = float(window.aspect_ratio) * 0.5
+    return min(1.0, half / DESIGN_HALF_WIDTH), max(half, DESIGN_HALF_WIDTH)
+
+
 class Screen:
     """Base class: a root entity plus small factories for labels, buttons and panels."""
 
@@ -50,8 +60,8 @@ class Screen:
         self.menu = menu
         self.game = menu.game
         self.pm = menu.game.pm
-        self.root = Entity(parent=camera.ui, enabled=False)
-        self.half_width = float(window.aspect_ratio) * 0.5
+        fit, self.half_width = ui_fit()
+        self.root = Entity(parent=camera.ui, enabled=False, scale=fit)
         if self.title:
             self.label(self.title, 0.0, 0.43, 2.0, (0, 0), COL_ACCENT)
         self.build()
@@ -731,7 +741,8 @@ class MenuManager:
         self.notice_ttl = 0.0
         self.backdrop = Entity(parent=camera.ui, model="quad", color=color.rgba(0.02, 0.03, 0.06, 0.92), scale=(4, 2),
                                z=1.0, enabled=False)
-        self.toast = Text("", parent=camera.ui, position=(0, -0.385), scale=0.9, origin=(0, 0), color=_c(COL_ACCENT), z=-3)
+        self.toast = Text("", parent=camera.ui, position=(0, -0.462), scale=0.9, origin=(0, 0), color=_c(COL_ACCENT), z=-3,
+                          enabled=False)
         self.screens = {
             "main": MainScreen(self), "setup": SetupScreen(self), "lobby": LobbyScreen(self),
             "armory": ArmoryScreen(self), "equipment": EquipmentScreen(self), "sponsors": SponsorScreen(self),
@@ -766,10 +777,16 @@ class MenuManager:
         self.backdrop.enabled = False
 
     def notify(self, text: str, seconds: float = 4.0) -> None:
-        """Short status line shown at the bottom of whatever screen is open."""
+        """Short status line: in the main screen's panel, at the bottom of any other screen; never over a match."""
         self.notice = text
         self.notice_ttl = seconds
         self.toast.text = text
+        self._place_toast()
+
+    def _place_toast(self) -> None:
+        shown = bool(self.notice) and self.current not in (None, "main")
+        if self.toast.enabled != shown:
+            self.toast.enabled = shown
 
     def update(self, dt: float) -> None:
         if self.notice_ttl > 0.0:
@@ -777,6 +794,7 @@ class MenuManager:
             if self.notice_ttl <= 0.0:
                 self.notice = ""
                 self.toast.text = ""
+        self._place_toast()
         if self.current is None:
             return
         self.timer += dt

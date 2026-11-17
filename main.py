@@ -97,6 +97,12 @@ def main(argv=None) -> int:
                  size=(width, height), vsync=vsync)
     window.fps_counter.enabled = False
     window.exit_button.enabled = False
+    if not args.fullscreen:                  # HUD and menus are laid out for the size the window opened with
+        from panda3d.core import WindowProperties
+
+        fixed = WindowProperties()
+        fixed.setFixedSize(True)
+        application.base.win.requestProperties(fixed)
 
     from engine.game import NexusGame
 

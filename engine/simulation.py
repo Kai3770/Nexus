@@ -40,7 +40,7 @@ from .controller_3d import (CollisionWorld, HitboxSet, KinematicState, HITBOX_MU
 # --------------------------------------------------------------------------- #
 #  Event identifiers (tuples appended to ``GameWorld.events``)
 # --------------------------------------------------------------------------- #
-EV_HIT = 1          # (EV_HIT, shooter, victim, damage, zone, killed, (x, y, z))
+EV_HIT = 1          # (EV_HIT, shooter, victim, damage, zone, killed, (x, y, z), gun)   gun: a bullet hit
 EV_DAMAGE = 2       # (EV_DAMAGE, victim, attacker, damage, zone, (ax, ay, az))
 EV_KILL = 3         # (EV_KILL, killer, victim, weapon, flags)
 EV_SPAWN = 4        # (EV_SPAWN, player, (x, y, z), yaw)
@@ -72,6 +72,7 @@ UPLINK_NEUTRALISED = 1  # ``team`` lost the zone (it is neutral again)
 KILL_HEADSHOT = 1
 KILL_EXPLOSIVE = 2
 KILL_SUICIDE = 4
+KILL_FIRST = 8                                  # the first elimination of the match
 
 REWARD_COMBAT = 0
 REWARD_KILL = 1
@@ -116,6 +117,7 @@ class PlayerStore:
         self.protect_until = np.zeros(n, dtype=np.int64)
         self.last_damage_tick = np.full(n, -100000, dtype=np.int64)
         self.last_attacker = np.full(n, -1, dtype=np.int64)
+        self.last_hostile_tick = np.full(n, -100000, dtype=np.int64)    # when last_attacker last hurt us
         self.ability_ready = np.zeros(n, dtype=np.int64)                 # lethal (G) usable from this command tick
         self.ability_cooldown = np.full(n, EQ.cooldown_ticks(EQ.DEFAULT_EQUIPMENT[0]), dtype=np.int64)
         self.tactical_ready = np.zeros(n, dtype=np.int64)                # tactical (F) usable from this command tick
@@ -481,6 +483,11 @@ class ZoneStore:
         self.active[:] = False
 
 
+def mode_upgrades(mode: int, upgrades_enabled: bool) -> bool:
+    """Do players bring their own weapon and operator upgrades?  Never in ESCALATION (stock for all)."""
+    return bool(upgrades_enabled) and int(mode) != C.MODE_ESC
+
+
 # =========================================================================== #
 #  Game world (authoritative)
 # =========================================================================== #
@@ -513,6 +520,7 @@ class GameWorld:
         self.matches_played = 0
         self.next_map = None                 # arena to load when the intermission ends (map rotation)
         self.strikes: list = []              # pending orbital lances: [impact tick, position, owner]
+        self.match_kills = 0                 # eliminations this match (the first one is flagged)
         self.loaded = maps.load_map(map_key)
         self.map_index = self.loaded.data.index
         self.world = self.loaded.world
@@ -540,9 +548,10 @@ class GameWorld:
         row = int(free[0])
         if weapon_ids is None:
             weapon_ids = W.DEFAULT_LOADOUT
-        if levels is None or not self.upgrades_enabled:
+        own_kit = mode_upgrades(self.mode, self.upgrades_enabled)
+        if levels is None or not own_kit:
             levels = np.zeros((W.LOADOUT_SLOTS, W.UPGRADE_COUNT), dtype=np.int64)
-        if operator is None or not self.upgrades_enabled:
+        if operator is None or not own_kit:
             operator = np.zeros(W.OPERATOR_COUNT, dtype=np.int64)
         s.active[row] = True
         s.is_bot[row] = bool(is_bot)
@@ -580,13 +589,25 @@ class GameWorld:
         return changed
 
     def remove_player(self, row: int) -> None:
-        s = self.store
+        """
+        Free a slot.  What the player still has in play goes with them, so a
+        newcomer in the same slot is never credited with it: grenades and
+        hatchets in flight, fire pools, pending lances and the claim on a
+        fall.  Smoke clouds stay (they hurt nobody and clients still show them);
+        a charge stuck to the leaver stays where they stood.
+        """
+        s, gs, z = self.store, self.grenades, self.zones
         s.active[row] = False
         s.alive[row] = False
         s.is_bot[row] = False
         s.hitboxes.valid[row] = False
         s.names[row] = ""
         self.ladder[row] = 0
+        gs.active &= gs.owner != row
+        gs.target[gs.target == row] = -1
+        z.active &= (z.owner != row) | (EQ.KIND[z.equip] == EQ.KIND_SMOKE)
+        self.strikes = [strike for strike in self.strikes if strike[2] != row]
+        s.last_attacker[s.last_attacker == row] = -1
 
     def humans(self) -> np.ndarray:
         s = self.store
@@ -600,10 +621,11 @@ class GameWorld:
     def choose_spawn(self, row: int):
         """Spawn point of the player's side that is farthest from every living enemy."""
         s, data = self.store, self.loaded.data
-        if C.team_mode(self.mode):
-            options = np.flatnonzero(data.spawn_team == s.team[row])
-        else:
+        options = np.flatnonzero(data.spawn_team == s.team[row]) if C.team_mode(self.mode) else np.zeros(0, int)
+        if options.size == 0:                   # free for all, or a drop-in arena without spawns for this squad
             options = np.arange(data.spawn_pos.shape[0])
+        if options.size == 0:                   # an arena without any spawn point (geometry tests)
+            return np.array([0.0, 1.0, 0.0]), 0.0
         points = data.spawn_pos[options]
         others = s.active & s.alive
         others[row] = False
@@ -631,6 +653,7 @@ class GameWorld:
         s.protect_until[row] = self.tick + int(C.SPAWN_PROTECTION * _TICKS)
         s.last_damage_tick[row] = -100000
         s.last_attacker[row] = -1
+        s.last_hostile_tick[row] = -100000
         wanted = self.mode_equipment(s.pending_equip[row])
         if wanted != (int(s.equip[row, 0]), int(s.equip[row, 1])):
             s.apply_equipment(row, wanted)                          # a new class: both items ready at once
@@ -738,9 +761,11 @@ class GameWorld:
         hostile = 0 <= attacker != victim
         if hostile:
             s.last_attacker[victim] = attacker
+            s.last_hostile_tick[victim] = self.tick
             s.pending_credits[attacker] += dealt
             source = tuple(s.move.pos[attacker].tolist())
-            self.events.append((EV_HIT, attacker, victim, dealt, zone, bool(killed), tuple(np.asarray(point).tolist())))
+            self.events.append((EV_HIT, attacker, victim, dealt, zone, bool(killed), tuple(np.asarray(point).tolist()),
+                                bool(weapon < W.WEAPON_COUNT)))
         else:
             source = tuple(np.asarray(point).tolist())
         self.events.append((EV_DAMAGE, victim, attacker if attacker >= 0 else NO_PLAYER, dealt, zone, source))
@@ -762,11 +787,15 @@ class GameWorld:
         s.respawn_tick[victim] = self.tick + int(C.RESPAWN_TIME * _TICKS)
         s.hitboxes.valid[victim] = False
         hostile = 0 <= attacker != victim
+        living = hostile and bool(s.alive[attacker])   # a blast or a fire can kill after its owner died
         if hostile:
             s.kills[attacker] += 1
-            if not ST.is_streak_kill(weapon):            # rewards never feed further rewards
+            if self.match_kills == 0:
+                flags |= KILL_FIRST
+            self.match_kills += 1
+            if living and not ST.is_streak_kill(weapon):  # rewards never feed further rewards
                 s.streak[attacker] += 1
-            bonus = 25 * int(min(s.streak[attacker] - 1, 8))
+            bonus = 25 * max(min(int(s.streak[attacker]) - 1, 8), 0)
             head = 50 if flags & KILL_HEADSHOT else 0
             s.score[attacker] += 100 + head
             if self.mode == C.MODE_TDM and s.team[attacker] < 2:
@@ -780,7 +809,7 @@ class GameWorld:
             s.score[victim] = max(int(s.score[victim]) - 50, 0)
             killer = victim if attacker == victim else NO_PLAYER
         self.events.append((EV_KILL, killer, victim, weapon, flags))
-        if hostile and self.mode != C.MODE_ESC:
+        if living and self.mode != C.MODE_ESC:
             self._grant_streaks(attacker)
         if self.mode == C.MODE_ESC:
             self._escalate(victim, attacker if hostile else NO_PLAYER, weapon)
@@ -815,19 +844,32 @@ class GameWorld:
             position = target
             self.strikes.append([self.tick + ST.duration_ticks(index), target, row])
         s.streak_ready[row] &= np.uint8(0xFF ^ (1 << index))
+        s.protect_until[row] = 0                               # acting ends spawn protection
         self.events.append((EV_STREAK, row, index, STREAK_USED, tuple(np.asarray(position, dtype=float).tolist())))
         return True
 
     def lance_target(self, row: int):
-        """The surface under the player's crosshair (or below the end of the ray); None over the void."""
+        """
+        Where the lance lands: under the feet of an enemy the crosshair is on,
+        else the surface under the crosshair (or below the end of the ray);
+        None over the void.
+        """
         s = self.store
         eye = s.eye_position(row)[0]
         direction = M.forward_vector(s.yaw[row], s.pitch[row])
+        down = np.array([0.0, -1.0, 0.0])
         t, item, _ = self.world.raycast(eye, direction, C.LANCE_RANGE, C.LAYER_BULLET)
+        enemies = s.active & s.alive & (s.team != s.team[row])
+        enemies[row] = False
+        if enemies.any():
+            _, entity, _ = s.hitboxes.raycast(eye[None, :], direction[None, :], t, enemies)
+            if entity[0] >= 0:
+                lifted = s.move.pos[int(entity[0])] + np.array([0.0, 0.2, 0.0])
+                drop, ground, _ = self.world.raycast(lifted, down, 60.0, C.LAYER_BULLET)
+                return lifted + down * (float(drop[0]) if ground[0] >= 0 else 0.2)
         if item[0] >= 0:
             return eye + direction * max(float(t[0]) - 0.05, 0.0)
         far = eye + direction * C.LANCE_RANGE
-        down = np.array([0.0, -1.0, 0.0])
         t, item, _ = self.world.raycast(far, down, 400.0, C.LAYER_BULLET)
         return far + down * float(t[0]) if item[0] >= 0 else None
 
@@ -943,8 +985,11 @@ class GameWorld:
         if attacker != NO_PLAYER:
             hatchet = weapon == C.EQUIP_KILL_BASE + ESC_LETHAL
             if weapon < W.WEAPON_COUNT or hatchet:
-                self.set_ladder_step(attacker, int(self.ladder[attacker]) + 1,
-                                     LADDER_STEAL if hatchet else LADDER_PROMOTED, victim)
+                step = int(self.ladder[attacker]) + 1
+                if hatchet:
+                    step = min(step, W.ESCALATION_STEPS - 1)  # only a kill with the last gun wins
+                if step != int(self.ladder[attacker]):
+                    self.set_ladder_step(attacker, step, LADDER_STEAL if hatchet else LADDER_PROMOTED, victim)
             if hatchet and self.ladder[victim] > 0:
                 self.set_ladder_step(victim, int(self.ladder[victim]) - C.ESCALATION_STEAL, LADDER_STOLEN, attacker)
             self.store.score[attacker] = int(self.ladder[attacker])
@@ -956,6 +1001,7 @@ class GameWorld:
     def throw_equipment(self, row: int, equip: int) -> int:
         """Throw a grenade, charge, flask or hatchet from the player's eyes; returns the projectile slot."""
         s = self.store
+        s.protect_until[row] = 0                                # acting ends spawn protection
         eye = s.eye_position(row)[0]
         lift = 0.03 if EQ.KIND[equip] == EQ.KIND_AXE else 0.10
         direction = M.forward_vector(s.yaw[row], min(float(s.pitch[row]) + lift, float(C.PITCH_LIMIT)))
@@ -978,6 +1024,7 @@ class GameWorld:
         s = self.store
         equip = int(s.equip[row, 1])
         if EQ.KIND[equip] == EQ.KIND_STIM:
+            s.protect_until[row] = 0
             s.heal_left[row] = float(EQ.DAMAGE[equip])
             s.heal_rate[row] = float(EQ.DAMAGE[equip]) / max(float(EQ.DURATION[equip]), 1.0e-6)
             s.last_damage_tick[row] = -100000                   # regeneration restarts at once
@@ -988,7 +1035,7 @@ class GameWorld:
     def _affected(self, position, radius: float, owner: int, always: int = -1):
         """Players a blast at ``position`` reaches: in range, in sight, hostile (or the owner), not protected."""
         s = self.store
-        rows = np.flatnonzero(s.active & s.alive)
+        rows = np.flatnonzero(s.active & s.alive & (self.phase == C.PHASE_LIVE))   # none between matches
         if rows.size == 0:
             return rows, np.zeros((0, 3)), np.zeros(0)
         centers = s.hitboxes.bound_center[rows]
@@ -1201,7 +1248,11 @@ class GameWorld:
         live = s.active & s.alive
         fell = np.flatnonzero(live & (s.move.pos[:, 1] < self.loaded.data.kill_y))
         for row in fell.tolist():
-            attacker = int(s.last_attacker[row]) if self.tick - s.last_damage_tick[row] < 5 * _TICKS else -1
+            if self.phase != C.PHASE_LIVE:                      # between matches nobody scores: back to a spawn
+                self.spawn_player(int(row))
+                continue
+            pushed = self.tick - s.last_hostile_tick[row] < 5 * _TICKS
+            attacker = int(s.last_attacker[row]) if pushed else -1
             self.kill_player(int(row), attacker, WEAPON_GRENADE if attacker >= 0 else 0, 0)
         live = s.active & s.alive
         regen = live & (self.tick - s.last_damage_tick > s.regen_delay) & (s.health < s.max_health)
@@ -1242,8 +1293,11 @@ class GameWorld:
         if rows.size == 0:
             return NO_PLAYER
         if self.mode == C.MODE_ESC:                       # furthest up the ladder, kills break ties
-            return int(rows[int(np.argmax(self.ladder[rows] * 4096 + s.kills[rows]))])
-        return int(rows[int(np.argmax(s.kills[rows]))])
+            value = self.ladder[rows] * 4096 + s.kills[rows]
+        else:
+            value = s.kills[rows]
+        best = np.flatnonzero(value == value.max())
+        return int(rows[best[0]]) if best.size == 1 else NO_PLAYER
 
     def _check_match_end(self) -> None:
         s = self.store
@@ -1290,6 +1344,7 @@ class GameWorld:
         s.streak_earned[:] = 0
         s.streak_ready[:] = 0
         self.strikes.clear()
+        self.match_kills = 0
         self.uplink_owner[:] = -1
         self.uplink_charge[:] = 0.0
         self.uplink_contested[:] = False

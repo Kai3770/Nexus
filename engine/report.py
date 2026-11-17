@@ -50,9 +50,12 @@ class MatchReport:
     def shot(self) -> None:
         self.shots += 1
 
-    def hit(self, damage: float, headshot: bool = False) -> list:
-        self.hits += 1
+    def hit(self, damage: float, headshot: bool = False, counted: bool = True) -> list:
+        """Damage we dealt.  Only ``counted`` hits (bullets) feed accuracy and headshots."""
         self.damage += float(damage)
+        if not counted:
+            return []
+        self.hits += 1
         if headshot:
             self.headshots += 1
             if self.headshots == 5:
@@ -60,10 +63,15 @@ class MatchReport:
         return []
 
     def kill(self, killer: int, victim: int, me: int, now: float, explosive: bool = False, reward: bool = False,
-             suicide: bool = False) -> list:
-        """Every elimination of the match (anybody's); returns the medals it earned the local player."""
+             suicide: bool = False, first: bool | None = None) -> list:
+        """
+        Every elimination of the match (anybody's); returns the medals it earned
+        the local player.  ``explosive`` is any equipment kill.  ``first`` is the
+        server's word that this was the match's first elimination (a player who
+        joined late has not seen the earlier ones); ``None`` counts locally.
+        """
         hostile = not suicide and killer >= 0 and killer != victim
-        first = hostile and self.match_kills == 0
+        first = hostile and (self.match_kills == 0 if first is None else bool(first))
         if hostile:
             self.match_kills += 1
         if victim == me:
@@ -122,7 +130,7 @@ class MatchReport:
     # ---- report ------------------------------------------------------------------------------------------
     @property
     def accuracy(self) -> float:
-        return self.hits / self.shots if self.shots else 0.0
+        return min(self.hits / self.shots, 1.0) if self.shots else 0.0       # one volley can hit two players
 
     def medal_counts(self) -> list:
         """``[(name, count)]`` in the order first earned."""
@@ -137,8 +145,8 @@ class MatchReport:
         if mvp_name:
             lines += ["MVP   %s   %s" % (mvp_name, _number(mvp_score)), ""]
         lines.append("ELIMINATIONS %d   DEATHS %d   K/D %.1f" % (self.kills, self.deaths, ratio))
-        lines.append("ACCURACY %d%%   (%d of %d)" % (round(self.accuracy * 100.0), self.hits, self.shots) if self.shots
-                     else "ACCURACY -")
+        lines.append("ACCURACY %d%%   (%d of %d)" % (round(self.accuracy * 100.0), min(self.hits, self.shots), self.shots)
+                     if self.shots else "ACCURACY -")
         lines.append("HEADSHOTS %d   BEST STREAK %d" % (self.headshots, self.best_streak))
         lines.append("DAMAGE %s" % _number(self.damage) + ("   CAPTURES %d" % self.captures if uplinks else ""))
         lines.append("+%s CREDITS   +%s XP" % (_number(self.credits), _number(self.xp)))

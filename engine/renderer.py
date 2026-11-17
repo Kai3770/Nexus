@@ -2462,9 +2462,11 @@ class HUD:
         self.mode_text = self._text("", 0.0, 0.432, 0.68, (0, 0), HUD_DIM)
         self.center_text = self._text("", 0.0, 0.17, 2.3, (0, 0), HUD_WHITE)
         self.sub_text = self._text("", 0.0, 0.115, 1.05, (0, 0), HUD_DIM)
-        self.hint_text = self._text("", 0.0, -0.36, 0.66, (0, 0), HUD_DIM)
+        self.narrow = hw < 0.8                     # 4:3 or 5:4: the header fills the top, the hint is wrapped
+        self.hint_text = self._text("", 0.0, -0.30 if self.narrow else -0.36, 0.66, (0, 0), HUD_DIM)
         # ---- feeds ------------------------------------------------------------------------------------
-        self.kill_lines = [self._text("", hw - 0.03, 0.445 - i * 0.031, 0.80, (0.5, 0), HUD_WHITE) for i in range(5)]
+        feed_top = 0.355 if self.narrow else 0.445
+        self.kill_lines = [self._text("", hw - 0.03, feed_top - i * 0.031, 0.80, (0.5, 0), HUD_WHITE) for i in range(5)]
         self.kill_feed: list = []                  # [text, rgb, ttl]
         self.reward_lines = [self._text("", 0.13, -0.035 - i * 0.03, 0.85, (-0.5, 0), HUD_GOLD) for i in range(4)]
         self.reward_feed: list = []
@@ -2493,6 +2495,9 @@ class HUD:
         self.report_body = Text("", parent=self.report, position=(-0.25, 0.265), scale=0.82, origin=(-0.5, 0.5),
                                 color=_rgba(*HUD_WHITE))
         self._report_stamp = None
+        # ---- between matches the boards cover the middle: result in the report title, the rest below ------
+        self.status_text = self._text("", 0.0, -0.372, 0.95, (0, 0), HUD_WHITE)
+        self._intermission = False
         # ---- shield, scorestreaks, death recap, alerts ---------------------------------------------------------
         self.shield_text = self._text("", -hw + 0.372, -0.445, 0.95, (-0.5, 0), HUD_CYAN)
         self.streak_text = self._text("", -hw + 0.045, -0.392, 0.62, (-0.5, 0), HUD_DIM)
@@ -2554,7 +2559,29 @@ class HUD:
         self.mesh.upload(fx_quads(corners, self.q_rgba[live], 2.0))
 
     def set_visible(self, visible: bool) -> None:
-        self.root.enabled = visible
+        if self.root.enabled != bool(visible):
+            self.root.enabled = bool(visible)
+
+    def reset(self) -> None:
+        """Forget the last match: feeds, hit marker, damage arcs, banners, boards, alerts."""
+        self.kill_feed.clear()
+        self.reward_feed.clear()
+        self._refresh_feed(self.kill_lines, self.kill_feed)
+        self._refresh_feed(self.reward_lines, self.reward_feed)
+        self.hit_time = 0.0
+        self.indicator_ttl[:] = 0.0
+        self.q_rgba[Q_HIT: Q_HIT + 4, 3] = 0.0
+        self.q_rgba[Q_INDICATOR: Q_INDICATOR + 6, 3] = 0.0
+        self.set_center("")
+        self.set_hint("")
+        self.set_recap("")
+        self.set_alert("")
+        self.set_report(None)
+        self.set_intermission(None)
+        self.set_scoreboard(False)
+        self.set_uplink_capture("")
+        self.set_uplink_markers(())
+        self._upload()
 
     # ---- crosshair / feedback vectors -----------------------------------------------------------
     def set_crosshair(self, spread: float, vertical_fov_deg: float, alpha: float = 1.0, dt: float = 0.016) -> None:
@@ -2741,9 +2768,13 @@ class HUD:
         self._set(self.streak_text, line)
         self._set(self.ready_text, ready)
 
-    def set_report(self, text) -> None:
+    def set_report(self, text, title: str = "MATCH REPORT", rgb=HUD_GOLD) -> None:
         """The match report beside the scoreboard; ``None`` / "" hides it and centres the scoreboard again."""
         visible = bool(text)
+        if visible and (title, rgb) != getattr(self, "_report_title", None):
+            self._report_title = (title, rgb)
+            self.report_title.text = title
+            self.report_title.color = _rgba(*rgb)
         if self.report.enabled != visible:
             self.report.enabled = visible
             self.board.x = self._board_shift if visible else 0.0
@@ -2751,6 +2782,20 @@ class HUD:
         if visible and text != self._report_stamp:
             self._report_stamp = text
             self.report_body.text = text
+
+    def set_intermission(self, status) -> None:
+        """
+        Between matches (``status`` is the line under the boards: countdown or
+        news) the reward feed moves below the boards, centred; ``None`` puts
+        it back next to the crosshair.
+        """
+        active = status is not None
+        if active != self._intermission:
+            self._intermission = active
+            for index, line in enumerate(self.reward_lines):
+                line.origin = (0, 0) if active else (-0.5, 0)
+                line.position = (0.0, -0.405 - index * 0.027) if active else (0.13, -0.035 - index * 0.03)
+        self._set(self.status_text, status or "")
 
     def set_recap(self, text: str) -> None:
         self._set(self.recap_text, text)
@@ -2783,6 +2828,10 @@ class HUD:
             self._color(self.center_text, rgb)
 
     def set_hint(self, text: str) -> None:
+        if self.narrow and len(text) > 70:                        # two lines that fit a 4:3 screen
+            words = text.split("   ")
+            half = len(words) // 2
+            text = "   ".join(words[:half]) + "\n" + "   ".join(words[half:])
         self._set(self.hint_text, text)
 
     def set_economy(self, credits_text: str, level_text: str) -> None:

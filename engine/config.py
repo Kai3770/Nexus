@@ -112,7 +112,7 @@ BROADCAST_ADDRESS = "255.255.255.255"
 BEACON_INTERVAL = 1.0
 BEACON_EXPIRY = 3.5
 PROTOCOL_MAGIC = 0x584E
-PROTOCOL_VERSION = 14
+PROTOCOL_VERSION = 15
 MAX_DATAGRAM = 1200
 RECV_BUFFER = 4096
 CONNECT_RETRY_INTERVAL = 0.25
@@ -443,7 +443,7 @@ STUN_OWNER_SCALE = 0.5                   # your own shock grenade stuns you for 
 STUN_EDGE_SCALE = 0.4                    # stun duration at the edge of the blast, relative to the centre
 STUN_LOOK_SCALE = 0.35                   # mouse sensitivity while stunned (client side)
 FIRE_HEIGHT = 1.9                        # a fire pool burns players whose feet are this close above it
-ZONE_CAPACITY = 16
+ZONE_CAPACITY = 2 * MAX_PLAYERS           # fire pools and smoke clouds at once (the oldest gives way)
 STATUS_STUN, STATUS_STIM = 1, 2
 
 # Derived names kept for the pulse grenade (the default lethal).

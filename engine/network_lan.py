@@ -94,7 +94,7 @@ ENT_S = np.dtype([("flags", "u1"), ("health", "u1"), ("weapon", "u1"), ("crouch"
 EF_ALIVE, EF_GROUND, EF_CROUCH, EF_SLIDE, EF_SPRINT, EF_ADS, EF_RELOAD, EF_BOT = (1 << i for i in range(8))
 
 _EVENT_FORMATS = {
-    S.EV_HIT: struct.Struct("<BHBBhhh"),            # victim, damage*10, zone, killed, position
+    S.EV_HIT: struct.Struct("<BHBBhhh"),            # victim, damage*10, zone, flags (1 killed, 2 no bullet), pos
     S.EV_DAMAGE: struct.Struct("<BHBhhh"),          # attacker, damage*10, zone, source position
     S.EV_KILL: struct.Struct("<BBBB"),              # killer, victim, weapon, flags
     S.EV_SPAWN: struct.Struct("<BhhhH"),            # player, position, yaw
@@ -336,8 +336,10 @@ def encode_event(event: tuple) -> bytes:
     kind = event[0]
     fmt = _EVENT_FORMATS[kind]
     if kind == S.EV_HIT:
-        _, _shooter, victim, damage, zone, killed, point = event
-        body = fmt.pack(victim, min(int(round(damage * 10.0)), 65535), zone, int(killed), *quantize_position(point))
+        _, _shooter, victim, damage, zone, killed, point = event[:7]
+        gun = bool(event[7]) if len(event) > 7 else True
+        body = fmt.pack(victim, min(int(round(damage * 10.0)), 65535), zone, int(bool(killed)) | (0 if gun else 2),
+                        *quantize_position(point))
     elif kind == S.EV_DAMAGE:
         _, _victim, attacker, damage, zone, source = event
         body = fmt.pack(attacker, min(int(round(damage * 10.0)), 65535), zone, *quantize_position(source))
@@ -380,7 +382,7 @@ def decode_event(data: bytes, offset: int):
     f = fmt.unpack_from(data, offset + 1)
     offset += 1 + fmt.size
     if kind == S.EV_HIT:
-        event = (kind, f[0], f[1] / 10.0, f[2], bool(f[3]), _unq(f[4:7], C.POS_QUANT))
+        event = (kind, f[0], f[1] / 10.0, f[2], bool(f[3] & 1), _unq(f[4:7], C.POS_QUANT), not f[3] & 2)
     elif kind == S.EV_DAMAGE:
         event = (kind, f[0], f[1] / 10.0, f[2], _unq(f[3:6], C.POS_QUANT))
     elif kind == S.EV_KILL:
@@ -860,6 +862,7 @@ class GameServer:
         self.beacon = None
         self.threads: list = []
         self.last_roster = 0.0
+        self.roster_phase = C.PHASE_LIVE      # phase of the last roster sent (a change sends one at once)
         self._rng = random.Random(cfg.seed)
         self.conditioner = NetConditioner(cfg.fake_lag_ms, cfg.fake_jitter_ms, cfg.fake_loss, cfg.seed)
         self.stats = {"ticks": 0, "malformed": 0, "bytes_in": 0, "bytes_out": 0, "max_tick_ms": 0.0,
@@ -1213,9 +1216,10 @@ class GameServer:
             self.bots.observe(events)
             self._route_events(events)
             self._send_snapshots(started)
-            if started - self.last_roster >= C.ROSTER_INTERVAL:
+            if started - self.last_roster >= C.ROSTER_INTERVAL or world.phase != self.roster_phase:
                 self._send_roster()
                 self.last_roster = started
+                self.roster_phase = world.phase
         elapsed = (time.perf_counter() - started) * 1000.0
         stats = self.stats
         stats["ticks"] += 1
@@ -1313,7 +1317,7 @@ class GameServer:
             return
         store = self.world.store
         rows = store.active_rows()
-        body = bytearray((rows.size,))
+        body = bytearray((rows.size, int(self.world.phase) & 0xFF))
         for row in rows.tolist():
             conn = self.by_pid.get(row)
             name = store.names[row].encode("utf-8")[:16]
@@ -1686,6 +1690,7 @@ class GameClient:
         self.event_seq = 0
         self.events: list = []
         self.roster: dict = {}
+        self.roster_phase = C.PHASE_LIVE        # match phase the server was in when it sent the roster
         self.scores = [0, 0]
         self.uplink_owner = np.full(3, -1, dtype=np.int64)
         self.uplink_contested = np.zeros(3, dtype=bool)
@@ -1875,8 +1880,9 @@ class GameClient:
         self.upgrades_enabled = bool(upgrades)
         self.score_limit, self.time_limit = score_limit, time_limit
         self.loaded = maps.load_map(map_index)
-        levels = self.levels if self.upgrades_enabled else np.zeros_like(self.levels)
-        operator = self.operator if self.upgrades_enabled else np.zeros_like(self.operator)
+        own_kit = S.mode_upgrades(mode, self.upgrades_enabled)
+        levels = self.levels if own_kit else np.zeros_like(self.levels)
+        operator = self.operator if own_kit else np.zeros_like(self.operator)
         self.predictor = Predictor(self.loaded.world, pid, self.weapon_ids, levels, operator, self.prestige)
         self.cmd_tick = tick
         self.state = CONNECTED
@@ -1956,8 +1962,8 @@ class GameClient:
         self.stats["events"] += 1
 
     def _on_roster(self, data: bytes, offset: int) -> None:
-        count = data[offset]
-        offset += 1
+        count, phase = data[offset], data[offset + 1]
+        offset += 2
         roster = {}
         for _ in range(count):
             pid, team, flags, kills, deaths, score, ping, length = ROSTER_ENTRY.unpack_from(data, offset)
@@ -1966,6 +1972,7 @@ class GameClient:
             offset += length
             roster[pid] = RosterEntry(pid, team, flags, kills, deaths, score, ping, name)
         self.roster = roster
+        self.roster_phase = phase
         if self.pid in roster:
             self.team = roster[self.pid].team
 

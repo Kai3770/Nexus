@@ -69,7 +69,7 @@ def test_a_gun_kill_climbs_one_step_with_a_full_magazine():
     s = game.store
     s.weapons.ammo[a] = 1
     events = kill(game, b, a, gun(game, a))
-    assert events == [(S.EV_KILL, a, b, LADDER[0], 0), (S.EV_LADDER, a, 1, S.LADDER_PROMOTED, b)]
+    assert events == [(S.EV_KILL, a, b, LADDER[0], S.KILL_FIRST), (S.EV_LADDER, a, 1, S.LADDER_PROMOTED, b)]
     assert tuple(s.weapons.weapon[a]) == (LADDER[1], LADDER[1])
     assert (s.weapons.ammo[a] == s.weapons.mag[a]).all()
     assert game.ladder[a] == 1 and s.score[a] == 1 and s.kills[a] == 1 and game.ladder[b] == 0

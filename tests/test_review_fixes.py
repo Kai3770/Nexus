@@ -226,3 +226,248 @@ def test_non_finite_and_malformed_numbers_in_a_save_are_sanitised():
     except SS.SaveTamperError:
         raised = True
     assert raised                                               # a damaged save, not a crash at start-up
+
+
+# ---------------------------------------------------------------------------------------------------------
+#  Match rules (rules review)
+# ---------------------------------------------------------------------------------------------------------
+from engine import equipment as EQ      # noqa: E402
+from engine import maps                 # noqa: E402
+from engine import streaks as ST        # noqa: E402
+from engine.report import MatchReport   # noqa: E402
+
+FRAG, FIRE, SMOKE, STIM = (EQ.EQUIP_INDEX[key] for key in ("pulse", "thermite", "smoke", "stim"))
+HATCHET = EQ.EQUIP_INDEX[C.ESCALATION_LETHAL]
+
+
+def _world(count=2, mode=C.MODE_FFA, key="crucible", **extra):
+    game = S.GameWorld(key, mode=mode, seed=5, **extra)
+    rows = [game.add_player("p%d" % i) for i in range(count)]
+    game.store.protect_until[:] = 0
+    game.drain_events()
+    return game, rows
+
+
+def test_a_player_who_leaves_takes_what_is_in_play_with_them():
+    game, (a, b) = _world()
+    s = game.store
+    near_b = s.move.pos[b] + np.array([0.0, 0.5, 0.0])
+    slot = game.grenades.spawn(near_b, np.zeros(3), 5, a, equip=FRAG)                # about to blow up next to b
+    fire = game.zones.spawn(s.move.pos[b], 3.0, game.tick, game.tick + 600, a, FIRE)
+    smoke = game.zones.spawn(s.move.pos[b], 3.0, game.tick, game.tick + 600, a, SMOKE)
+    game.strikes.append([game.tick + 30, s.move.pos[b].copy(), a])
+    s.last_attacker[b] = a
+    game.remove_player(a)
+    assert not game.grenades.active[slot] and not game.zones.active[fire] and game.zones.active[smoke]
+    assert game.strikes == [] and s.last_attacker[b] == -1
+    c = game.add_player("newcomer")                                                 # takes the free slot ...
+    assert c == a
+    s.protect_until[:] = 0
+    events = []
+    for _ in range(2 * C.TICK_RATE):
+        game.end_tick()
+        events += game.drain_events()
+    assert s.health[b] == s.max_health[b] and s.kills[c] == 0                       # ... and inherits nothing
+    assert not any(e[0] in (S.EV_HIT, S.EV_KILL, S.EV_REWARD) for e in events)
+
+
+def test_an_arena_without_spawns_for_one_squad_still_spawns_everybody():
+    yard = {"name": "ONE SIDED", "mirror": False,
+            "center": [(0.0, -1.0, 0.0, 28.0, 1.0, 20.0, "floor", -1), (0.0, 0.0, 10.5, 30.0, 4.0, 1.0, "brick", -1),
+                       (0.0, 0.0, -10.5, 30.0, 4.0, 1.0, "brick", -1), (-14.5, 0.0, 0.0, 1.0, 4.0, 22.0, "concrete", -1),
+                       (14.5, 0.0, 0.0, 1.0, 4.0, 22.0, "concrete", -1)],
+            "half": [(-12.0, 0.0, -4.0, 1.0, 1.0, 1.0, "spawn", 0), (-12.0, 0.0, 4.0, 1.0, 1.0, 1.0, "spawn", 0)]}
+    maps.register_map("one_sided", yard)
+    try:
+        game = S.GameWorld("one_sided", mode=C.MODE_TDM, seed=2)
+        rows = [game.add_player("p%d" % team, team=team) for team in (0, 1)]       # used to raise in np.argmax
+        assert game.store.alive[rows].all()
+    finally:
+        maps.unregister_map("one_sided")
+
+
+def _end_match(game):
+    game.time_left = C.TICK_DT * 0.5
+    game.end_tick()
+    assert game.phase == C.PHASE_ENDED
+    game.drain_events()
+
+
+def test_nothing_scores_between_matches():
+    game, (a, b) = _world()
+    s = game.store
+    s.last_attacker[b] = a
+    s.last_hostile_tick[b] = game.tick
+    _end_match(game)
+    kills, deaths = s.kills.copy(), s.deaths.copy()
+    s.move.pos[b] = (0.0, game.loaded.data.kill_y - 2.0, 0.0)                     # pushed off the arena
+    game.end_tick()
+    events = game.drain_events()
+    assert not any(e[0] == S.EV_KILL for e in events) and any(e[0] == S.EV_SPAWN and e[1] == b for e in events)
+    assert s.alive[b] and np.array_equal(s.kills, kills) and np.array_equal(s.deaths, deaths)
+    velocity = s.move.vel[b].copy()
+    game.explode(s.hitboxes.bound_center[b] + np.array([1.0, 0.0, 0.0]), a, 7, FRAG)
+    assert np.array_equal(s.move.vel[b], velocity)                                  # no knock-back either
+
+
+def test_a_fall_is_credited_to_hostile_damage_only():
+    game, (a, b) = _world()
+    s = game.store
+    game.apply_damage(b, a, 10.0, C.ZONE_TORSO, 0, s.move.pos[b])
+    for _ in range(6 * C.TICK_RATE):                                                # long ago ...
+        game.end_tick()
+    game.apply_damage(b, b, 5.0, C.ZONE_TORSO, C.EQUIP_KILL_BASE + FRAG, s.move.pos[b], explosive=True)
+    game.drain_events()
+    s.move.pos[b] = (0.0, game.loaded.data.kill_y - 2.0, 0.0)                     # ... then b blows himself off
+    game.end_tick()
+    kill = [e for e in game.drain_events() if e[0] == S.EV_KILL]
+    assert kill and kill[0][1] == S.NO_PLAYER and kill[0][4] & S.KILL_SUICIDE and s.kills[a] == 0
+
+
+def test_posthumous_kills_neither_extend_the_streak_nor_earn_rewards():
+    game, rows = _world(4)
+    a, others = rows[0], rows[1:]
+    s = game.store
+    game.kill_player(a, others[0], 0, 0)                                            # a dies, a fire keeps burning
+    game.drain_events()
+    for victim in others:
+        game.apply_damage(victim, a, 500.0, C.ZONE_TORSO, C.EQUIP_KILL_BASE + FIRE, s.move.pos[victim])
+    events = game.drain_events()
+    assert s.kills[a] == 3 and s.streak[a] == 0 and s.streak_ready[a] == 0          # the kills count, nothing else
+    assert not any(e[0] == S.EV_STREAK for e in events)
+    rewards = [e[2] for e in events if e[0] == S.EV_REWARD and e[4] == S.REWARD_KILL]
+    assert rewards == [100, 100, 100]
+
+
+def test_the_kill_bonus_never_goes_negative():
+    game, (a, b) = _world()
+    game.kill_player(b, a, C.STREAK_KILL_BASE + ST.LANCE, S.KILL_EXPLOSIVE)          # a reward kill on streak 0
+    rewards = [e for e in game.drain_events() if e[0] == S.EV_REWARD and e[4] == S.REWARD_KILL]
+    assert rewards and rewards[0][2] == 100                                         # used to pay 75
+
+
+def test_ties_are_draws_in_free_for_all_and_escalation():
+    game, (a, b) = _world()
+    game.store.kills[[a, b]] = 3
+    assert game.leading_side() == S.NO_PLAYER                                       # used to pick the lower slot
+    game.store.kills[b] = 4
+    assert game.leading_side() == b
+    game, (a, b) = _world(mode=C.MODE_ESC)
+    game.ladder[[a, b]] = 7
+    game.store.kills[[a, b]] = 9
+    assert game.leading_side() == S.NO_PLAYER
+    game.store.kills[a] = 10
+    assert game.leading_side() == a
+
+
+def test_escalation_is_stock_for_everybody():
+    assert not S.mode_upgrades(C.MODE_ESC, True) and S.mode_upgrades(C.MODE_TDM, True)
+    game = S.GameWorld("crucible", mode=C.MODE_ESC, seed=5)
+    row = game.add_player("veteran", operator=np.full(W.OPERATOR_COUNT, 5))
+    s = game.store
+    assert not s.operator[row].any() and s.blast_resist[row] == 1.0
+    assert s.regen_delay[row] == int(round(C.HEALTH_REGEN_DELAY * C.TICK_RATE))
+
+
+def test_a_hatchet_kill_on_the_last_step_does_not_win():
+    game, (a, b) = _world(mode=C.MODE_ESC)
+    last = W.ESCALATION_STEPS - 1
+    game.set_ladder_step(a, last)
+    game.set_ladder_step(b, 4)
+    game.kill_player(b, a, C.EQUIP_KILL_BASE + HATCHET, 0)
+    events = game.drain_events()
+    game.end_tick()
+    assert game.ladder[a] == last and game.ladder[b] == 4 - C.ESCALATION_STEAL and game.phase == C.PHASE_LIVE
+    assert not any(e[0] == S.EV_LADDER and e[1] == a for e in events)               # no second FINAL WEAPON banner
+    game.spawn_player(b)
+    game.kill_player(b, a, int(game.store.weapons.weapon[a, 0]), 0)                 # the last gun still wins
+    game.end_tick()
+    assert game.phase == C.PHASE_ENDED and game.winner == a
+
+
+def test_equipment_and_rewards_end_spawn_protection():
+    for act in ("lethal", "stim", "reward"):
+        game, (a, b) = _world()
+        s = game.store
+        s.equip[a] = (FRAG, STIM)
+        s.protect_until[a] = game.tick + 600
+        if act == "lethal":
+            game.throw_equipment(a, FRAG)
+        elif act == "stim":
+            game.use_tactical(a)
+        else:
+            s.streak_ready[a] = 1 << ST.AEGIS
+            assert game.use_streak(a)
+        assert s.protect_until[a] == 0, act
+
+
+def test_there_is_room_for_every_players_fire_and_smoke():
+    assert C.ZONE_CAPACITY >= 2 * C.MAX_PLAYERS and S.ZoneStore().active.size == C.ZONE_CAPACITY
+
+
+# ---------------------------------------------------------------------------------------------------------
+#  What the client is told (client review)
+# ---------------------------------------------------------------------------------------------------------
+def test_hits_say_whether_a_bullet_landed():
+    game, (a, b) = _world()
+    s = game.store
+    game.apply_damage(b, a, 10.0, C.ZONE_TORSO, int(s.weapons.weapon[a, 0]), s.move.pos[b])
+    game.apply_damage(b, a, 10.0, C.ZONE_TORSO, C.EQUIP_KILL_BASE + FRAG, s.move.pos[b], explosive=True)
+    hits = [e for e in game.drain_events() if e[0] == S.EV_HIT]
+    assert [hit[7] for hit in hits] == [True, False]
+    report = MatchReport()
+    report.shot()
+    report.hit(10.0, counted=True)
+    for _ in range(4):
+        report.hit(25.0, headshot=True, counted=False)                              # splash, fire, the lance ...
+    assert report.hits == 1 and report.headshots == 0 and report.damage == 110.0 and report.accuracy == 1.0
+
+
+def test_first_strike_is_the_servers_call():
+    game, (a, b, c) = _world(3)
+    game.kill_player(b, b, 0, 0)                                                   # a fall is no elimination
+    game.kill_player(c, a, 0, 0)
+    game.kill_player(b, a, 0, 0) if game.store.alive[b] else None
+    flags = [e[4] for e in game.drain_events() if e[0] == S.EV_KILL]
+    assert flags[0] & S.KILL_SUICIDE and flags[1] & S.KILL_FIRST and not any(f & S.KILL_FIRST for f in flags[2:])
+    game.restart_match()
+    game.drain_events()
+    game.kill_player(a, b, 0, 0)
+    assert [e[4] for e in game.drain_events() if e[0] == S.EV_KILL] == [S.KILL_FIRST]
+    late = MatchReport()                                                            # joined after the first kill
+    assert late.kill(0, 1, 0, 5.0, first=False) == [] and late.kill(0, 2, 0, 60.0, first=False) == []
+
+
+def test_the_roster_goes_out_at_once_when_the_match_ends():
+    server, conn, addr, _ = _server(29807)
+    sent = []
+    server._send_raw = lambda datagram, to: sent.append(datagram)
+    conn.last_recv = time.perf_counter()                                             # not a silent client
+    server.tick_once()
+    sent.clear()
+    with server.lock:
+        server.world.time_left = C.TICK_DT * 0.5
+    conn.last_recv = time.perf_counter()
+    server.tick_once()                                                               # long before ROSTER_INTERVAL
+    rosters = [d for d in sent if N.HEADER.unpack_from(d, 0)[1] == N.PKT_ROSTER]
+    assert len(rosters) == 1 and server.world.phase == C.PHASE_ENDED
+    client = N.GameClient("r", W.DEFAULT_LOADOUT, np.zeros((2, W.UPGRADE_COUNT), int), np.zeros(W.OPERATOR_COUNT, int))
+    client._on_roster(rosters[0], N.HEADER.size)
+    assert client.roster_phase == C.PHASE_ENDED and conn.pid in client.roster
+
+
+def test_drop_in_arena_text_cannot_carry_markup_and_broken_files_never_crash():
+    clean = maps._normalise_definition("x", {"name": "<scale:99>EVIL", "description": "a <b>bold</b> claim" * 20,
+                                             "center": [(0, -1, 0, 4, 1, 4, "floor", -1)]})
+    assert clean["name"] == "scale:99EVIL" and "<" not in clean["description"] and len(clean["description"]) <= 120
+    original = C.MAPS_DIR
+    with tempfile.TemporaryDirectory() as folder:
+        C.MAPS_DIR = __import__("pathlib").Path(folder)
+        try:
+            (C.MAPS_DIR / "numbers.json").write_text('{"center": [5]}')               # TypeError inside
+            (C.MAPS_DIR / "empty.json").write_text('{"center": [[0, -1, 0, 4, 1, 4, "floor", -1]]}')   # no spawn
+            keys = maps.reload_registry()
+            assert "numbers" not in keys and "empty" not in keys and len(maps.REGISTRY_ERRORS) == 2
+        finally:
+            C.MAPS_DIR = original
+            maps.reload_registry()

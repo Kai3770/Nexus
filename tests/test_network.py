@@ -57,7 +57,7 @@ def test_snapshot_entity_delta_codec():
 
 
 def test_event_codec_round_trip():
-    events = [(S.EV_HIT, 1, 2, 26.4, 0, True, (1.5, 2.25, -3.0)), (S.EV_DAMAGE, 2, 1, 26.4, 1, (4.0, 0.0, 1.0)),
+    events = [(S.EV_HIT, 1, 2, 26.4, 0, True, (1.5, 2.25, -3.0), True), (S.EV_DAMAGE, 2, 1, 26.4, 1, (4.0, 0.0, 1.0)),
               (S.EV_KILL, 1, 2, 3, 1), (S.EV_SPAWN, 4, (1.0, 0.0, 2.0), 1.5), (S.EV_SHOT, 1, 0, (0, 1.5, 0), (10, 1.5, 30)),
               (S.EV_EXPLOSION, (1, 2, 3), 255, 7, 3), (S.EV_GRENADE, 7, 1, (0, 1, 2), (5, 6, -7), 96, 12345, 2),
               (S.EV_REWARD, 1, 125, 100, 1), (S.EV_MATCH, 2, 0, 1, 0)]
@@ -65,7 +65,9 @@ def test_event_codec_round_trip():
         blob = N.encode_event(event)
         decoded, offset = N.decode_event(blob, 0)
         assert offset == len(blob) and decoded[0] == event[0]
-    assert N.decode_event(N.encode_event(events[0]), 0)[0] == (S.EV_HIT, 2, 26.4, 0, True, (1.5, 2.25, -3.0))
+    assert N.decode_event(N.encode_event(events[0]), 0)[0] == (S.EV_HIT, 2, 26.4, 0, True, (1.5, 2.25, -3.0), True)
+    blast = (S.EV_HIT, 1, 2, 12.0, 1, False, (0.0, 1.0, 0.0), False)              # splash, fire, hatchet, lance
+    assert N.decode_event(N.encode_event(blast), 0)[0] == (S.EV_HIT, 2, 12.0, 1, False, (0.0, 1.0, 0.0), False)
     assert N.decode_event(N.encode_event(events[6]), 0)[0] == (S.EV_GRENADE, 7, 1, (0.0, 1.0, 2.0), (5.0, 6.0, -7.0), 96, 12345, 2)
     assert N.decode_event(N.encode_event(events[5]), 0)[0] == (S.EV_EXPLOSION, (1.0, 2.0, 3.0), 255, 7, 3)
     stick = N.decode_event(N.encode_event((S.EV_STICK, 9, 4, (1.5, 0.25, -2.0))), 0)[0]
